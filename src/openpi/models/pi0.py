@@ -272,13 +272,37 @@ class Pi0(_model.BaseModel):
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
+        
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
-        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+        
+        if noise is not None:
+            # Use provided noise
+            noise = jnp.asarray(noise)
+            # Validate shape - noise must match the model's fixed action dimension
+            if len(noise.shape) != 3:
+                raise ValueError(f"Provided noise must be 3D (batch_size, action_horizon, action_dim), got shape {noise.shape}")
+            
+            noise_batch_size, noise_action_horizon, noise_action_dim = noise.shape
+            if noise_batch_size != batch_size:
+                raise ValueError(f"Noise batch size {noise_batch_size} does not match observation batch size {batch_size}")
+            if noise_action_horizon != self.action_horizon:
+                raise ValueError(f"Noise action horizon {noise_action_horizon} does not match model action horizon {self.action_horizon}")
+            
+            # The action dimension must match the model's fixed action dimension
+            # (determined by the action_in_proj layer's input size)
+            model_action_dim = self.action_in_proj.in_features
+            if noise_action_dim != model_action_dim:
+                raise ValueError(f"Noise action dimension {noise_action_dim} does not match model's action dimension {model_action_dim}")
+        else:
+            # Generate noise using the model's actual action dimension
+            model_action_dim = self.action_in_proj.in_features
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, model_action_dim))
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)

@@ -39,7 +39,7 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
 
     @override
-    def infer(self, obs: dict) -> dict:  # type: ignore[misc]
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -48,9 +48,19 @@ class Policy(BasePolicy):
 
         start_time = time.monotonic()
         self._rng, sample_rng = jax.random.split(self._rng)
+        
+        # Prepare kwargs for sample_actions
+        sample_kwargs = dict(self._sample_kwargs)
+        if noise is not None:
+            # Convert noise to JAX array and ensure it has the right batch dimension
+            noise_jax = jnp.asarray(noise)
+            if noise_jax.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
+                noise_jax = noise_jax[None, ...]  # Make it (1, action_horizon, action_dim)
+            sample_kwargs["noise"] = noise_jax
+        
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **self._sample_kwargs),
+            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **sample_kwargs),
         }
         # Unbatch and convert to np.ndarray.        # Unbatch and convert to np.ndarray.
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
