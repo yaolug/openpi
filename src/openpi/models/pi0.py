@@ -1,4 +1,3 @@
-import dataclasses
 import logging
 
 import einops
@@ -9,10 +8,10 @@ import jax.numpy as jnp
 from typing_extensions import override
 
 from openpi.models import model as _model
+from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
-import openpi.shared.nnx_utils as nnx_utils
 
 logger = logging.getLogger("openpi")
 
@@ -64,85 +63,8 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
-@dataclasses.dataclass(frozen=True)
-class Pi0Config(_model.BaseModelConfig):
-    dtype: str = "bfloat16"
-    paligemma_variant: _gemma.Variant = "gemma_2b"
-    action_expert_variant: _gemma.Variant = "gemma_300m"
-
-    # Set the model specific defaults.
-    action_dim: int = 32
-    action_horizon: int = 50
-    max_token_len: int = 48
-
-    @property
-    @override
-    def model_type(self) -> _model.ModelType:
-        return _model.ModelType.PI0
-
-    @override
-    def create(self, rng: at.KeyArrayLike) -> "Pi0":
-        return Pi0(self, rngs=nnx.Rngs(rng))
-
-    @override
-    def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
-        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
-
-        with at.disable_typechecking():
-            observation_spec = _model.Observation(
-                images={
-                    "base_0_rgb": image_spec,
-                    "left_wrist_0_rgb": image_spec,
-                    "right_wrist_0_rgb": image_spec,
-                },
-                image_masks={
-                    "base_0_rgb": image_mask_spec,
-                    "left_wrist_0_rgb": image_mask_spec,
-                    "right_wrist_0_rgb": image_mask_spec,
-                },
-                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
-                tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
-            )
-        action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
-
-        return observation_spec, action_spec
-
-    def get_freeze_filter(self) -> nnx.filterlib.Filter:
-        """Returns the freeze filter based on the model config."""
-        filters = []
-        has_lora = False
-        gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
-        action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
-        if "lora" in self.paligemma_variant:
-            filters.append(
-                gemma_params_filter,
-            )
-            if "lora" not in self.action_expert_variant:
-                # If only freeze gemma params, exclude action expert params.
-                filters.append(
-                    nnx.Not(action_expert_params_filter),
-                )
-            has_lora = True
-        elif "lora" in self.action_expert_variant:
-            filters.append(
-                action_expert_params_filter,
-            )
-            has_lora = True
-
-        if has_lora:
-            # If any lora is used, exclude all lora params.
-            filters.append(
-                nnx.Not(nnx_utils.PathRegex(".*lora.*")),
-            )
-        if not filters:
-            return nnx.Nothing
-        return nnx.All(*filters)
-
-
 class Pi0(_model.BaseModel):
-    def __init__(self, config: Pi0Config, rngs: nnx.Rngs):
+    def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -275,30 +197,38 @@ class Pi0(_model.BaseModel):
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
-        
+
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
-        
+
         if noise is not None:
             # Use provided noise
             noise = jnp.asarray(noise)
             # Validate shape - noise must match the model's fixed action dimension
             if len(noise.shape) != 3:
-                raise ValueError(f"Provided noise must be 3D (batch_size, action_horizon, action_dim), got shape {noise.shape}")
-            
+                raise ValueError(
+                    f"Provided noise must be 3D (batch_size, action_horizon, action_dim), got shape {noise.shape}"
+                )
+
             noise_batch_size, noise_action_horizon, noise_action_dim = noise.shape
             if noise_batch_size != batch_size:
-                raise ValueError(f"Noise batch size {noise_batch_size} does not match observation batch size {batch_size}")
+                raise ValueError(
+                    f"Noise batch size {noise_batch_size} does not match observation batch size {batch_size}"
+                )
             if noise_action_horizon != self.action_horizon:
-                raise ValueError(f"Noise action horizon {noise_action_horizon} does not match model action horizon {self.action_horizon}")
-            
+                raise ValueError(
+                    f"Noise action horizon {noise_action_horizon} does not match model action horizon {self.action_horizon}"
+                )
+
             # The action dimension must match the model's fixed action dimension
             # (determined by the action_in_proj layer's input size)
             model_action_dim = self.action_in_proj.in_features
             if noise_action_dim != model_action_dim:
-                raise ValueError(f"Noise action dimension {noise_action_dim} does not match model's action dimension {model_action_dim}")
+                raise ValueError(
+                    f"Noise action dimension {noise_action_dim} does not match model's action dimension {model_action_dim}"
+                )
         else:
             # Generate noise using the model's actual action dimension
             model_action_dim = self.action_in_proj.in_features

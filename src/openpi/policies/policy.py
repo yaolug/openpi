@@ -1,11 +1,7 @@
 from collections.abc import Sequence
-import logging
-import pathlib
 import time
 from typing import Any, TypeAlias
 
-import flax
-import flax.traverse_util
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -30,13 +26,25 @@ class Policy(BasePolicy):
         output_transforms: Sequence[_transforms.DataTransformFn] = (),
         sample_kwargs: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        device: str = "cpu",
+        is_pytorch: bool = False,
     ):
-        self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        self._model = model
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
-        self._rng = rng or jax.random.key(0)
         self._sample_kwargs = sample_kwargs or {}
         self._metadata = metadata or {}
+        self._device = device
+        self._is_pytorch_model = is_pytorch
+
+        if self._is_pytorch_model:
+            self._model = self._model.to(device)
+            self._model.eval()
+            self._sample_actions = model.sample_actions
+        else:
+            # JAX model setup
+            self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            self._rng = rng or jax.random.key(0)
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
@@ -48,7 +56,7 @@ class Policy(BasePolicy):
 
         start_time = time.monotonic()
         self._rng, sample_rng = jax.random.split(self._rng)
-        
+
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
@@ -57,12 +65,14 @@ class Policy(BasePolicy):
             if noise_jax.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
                 noise_jax = noise_jax[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise_jax
-        
-        outputs = {
-            "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **sample_kwargs),
-        }
-        # Unbatch and convert to np.ndarray.        # Unbatch and convert to np.ndarray.
+
+        actions = (
+            self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **sample_kwargs)
+            if not self._is_pytorch_model
+            else self._sample_actions(inputs, noise=noise)  # TODO
+        )
+        outputs = {"state": inputs["state"], "actions": actions}
+        # Unbatch and convert to np.ndarray.
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
         model_time = time.monotonic() - start_time
 
@@ -71,32 +81,3 @@ class Policy(BasePolicy):
             "infer_ms": model_time * 1000,
         }
         return outputs
-
-    @property
-    def metadata(self) -> dict[str, Any]:
-        return self._metadata
-
-
-class PolicyRecorder(_base_policy.BasePolicy):
-    """Records the policy's behavior to disk."""
-
-    def __init__(self, policy: _base_policy.BasePolicy, record_dir: str):
-        self._policy = policy
-
-        logging.info(f"Dumping policy records to: {record_dir}")
-        self._record_dir = pathlib.Path(record_dir)
-        self._record_dir.mkdir(parents=True, exist_ok=True)
-        self._record_step = 0
-
-    @override
-    def infer(self, obs: dict) -> dict:  # type: ignore[misc]
-        results = self._policy.infer(obs)
-
-        data = {"inputs": obs, "outputs": results}
-        data = flax.traverse_util.flatten_dict(data, sep="/")
-
-        output_path = self._record_dir / f"step_{self._record_step}"
-        self._record_step += 1
-
-        np.save(output_path, np.asarray(data))
-        return results
