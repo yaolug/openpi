@@ -55,25 +55,40 @@ class Policy(BasePolicy):
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
 
         start_time = time.monotonic()
-        self._rng, sample_rng = jax.random.split(self._rng)
+        if not self._is_pytorch_model:
+            self._rng, sample_rng = jax.random.split(self._rng)
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
-            # Convert noise to JAX array and ensure it has the right batch dimension
-            noise_jax = jnp.asarray(noise)
-            if noise_jax.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
-                noise_jax = noise_jax[None, ...]  # Make it (1, action_horizon, action_dim)
-            sample_kwargs["noise"] = noise_jax
+            if self._is_pytorch_model:
+                import torch
+                noise = torch.from_numpy(noise)
+                noise = noise.to(self._device)
+            else:
+                noise = jnp.asarray(noise)
+
+            if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
+                noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
+            sample_kwargs["noise"] = noise
 
         actions = (
             self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **sample_kwargs)
             if not self._is_pytorch_model
-            else self._sample_actions(inputs, noise=noise)  # TODO
+            else self._sample_actions(inputs, **sample_kwargs)
         )
         outputs = {"state": inputs["state"], "actions": actions}
         # Unbatch and convert to np.ndarray.
-        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        if self._is_pytorch_model:
+            # For PyTorch models, handle CUDA tensors by moving to CPU first
+            def convert_pytorch_tensor(x):
+                if hasattr(x, 'cpu'):  # PyTorch tensor
+                    return np.asarray(x[0, ...].detach().cpu())
+                else:
+                    return np.asarray(x[0, ...])
+            outputs = jax.tree.map(convert_pytorch_tensor, outputs)
+        else:
+            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
         model_time = time.monotonic() - start_time
 
         outputs = self._output_transform(outputs)

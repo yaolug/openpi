@@ -6,39 +6,60 @@ This demonstrates the basic usage patterns for both implementations.
 """
 
 import logging
-
+import argparse
 import numpy as np
+import jax
+import jax.numpy as jnp
+from openpi.policies import policy_config as _policy_config
+from openpi.training import config as _config
+from openpi.shared import download
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def create_example_observation():
-    """Create an example observation for testing."""
-    # Create test images (RGB, shape: height x width x channels)
-    image_shape = (224, 224, 3)
+def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
+    """Create example input data matching the expected format."""
+    
+    if model_name == "pi0_aloha_sim":
+        # Create example data for ALOHA sim environment
+        example = {
+            "images": {
+                "cam_high": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
+                "cam_low": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
+            },
+            "state": np.random.randn(14).astype(np.float32),  # 14 motors for ALOHA sim
+            "prompt": "Pick up the cube and place it in the bin",
+        }
+    elif model_name == "pi0_aloha_towel":
+        # Create example data for ALOHA towel task
+        example = {
+            "images": {
+                "cam_high": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
+                # Note: towel task typically only uses one camera
+            },
+            "state": np.random.randn(14).astype(np.float32),  # 14 motors for ALOHA
+            "prompt": "Fold the towel neatly on the table",
+        }
+    elif model_name == "pi0_base":
+        # Create example data for base droid policy
+        example = {
+            "images": {
+                "cam_high": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
+                "cam_low": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
+            },
+            "state": np.random.randn(8).astype(np.float32),  # Joint + gripper positions
+            "prompt": "Pick up the object and move it to the target location",
+        }
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+    
+    return example
 
-    observation = {
-        "images": {
-            "base_0_rgb": np.random.rand(*image_shape).astype(np.float32),
-            "left_wrist_0_rgb": np.random.rand(*image_shape).astype(np.float32),
-            "right_wrist_0_rgb": np.random.rand(*image_shape).astype(np.float32),
-        },
-        "image_masks": {
-            "base_0_rgb": True,
-            "left_wrist_0_rgb": True,
-            "right_wrist_0_rgb": True,
-        },
-        "state": np.random.rand(32).astype(np.float32),  # Robot state (32-dim)
-        "tokenized_prompt": np.random.randint(0, 1000, (48,), dtype=np.int32),  # Language tokens
-        "tokenized_prompt_mask": np.ones((48,), dtype=bool),  # Token mask
-    }
-
-    return observation
 
 
-def run_jax_inference_example():
+def run_jax_inference_example(observation, model_name):
     """Example of running inference with JAX Pi0 model."""
     logger.info("=== JAX Pi0 Inference Example ===")
 
@@ -48,32 +69,21 @@ def run_jax_inference_example():
         from openpi.models.pi0_config import Pi0Config
         from openpi.policies.policy import Policy
 
-        # Create model configuration
-        config = Pi0Config(
-            action_dim=32,
-            action_horizon=50,
-            max_token_len=48,
-        )
+        config = _config.get_config(model_name)
+        checkpoint_dir = download.maybe_download(f"s3://openpi-assets/checkpoints/{model_name}")
+        
+        # Create trained policy
+        policy = _policy_config.create_trained_policy(config, checkpoint_dir)
 
-        # Create the model
-        rng = jax.random.key(42)
-        model = config.create(rng)
-
-        # Create policy wrapper
-        policy = Policy(
-            model=model,
-            sample_kwargs={"num_steps": 10},  # Number of diffusion denoising steps
-        )
-
-        # Create test observation
-        observation = create_example_observation()
-
-        # Optional: provide custom noise for deterministic results
-        noise = np.random.randn(config.action_horizon, config.action_dim).astype(np.float32)
+        rng_key = jax.random.key(42)
+        noise_shape = (config.model.action_horizon, config.model.action_dim)  # Use model's expected dimension
+        jax_noise = jax.random.normal(rng_key, noise_shape, dtype=jnp.float32)
+        noise_np = np.array(jax_noise)
+        policy._rng = rng_key
 
         # Run inference
         logger.info("Running JAX inference...")
-        result = policy.infer(observation, noise=noise)
+        result = policy.infer(observation, noise=noise_np)
 
         # Print results
         logger.info("JAX inference completed!")
@@ -81,14 +91,14 @@ def run_jax_inference_example():
         logger.info(f"  - Actions shape: {result['actions'].shape}")
         logger.info(f"  - Actions range: [{result['actions'].min():.3f}, {result['actions'].max():.3f}]")
 
-        return result
+        return result, noise_np
 
     except ImportError as e:
         logger.error(f"Failed to run JAX inference: {e}")
         return None
 
 
-def run_pytorch_inference_example():
+def run_pytorch_inference_example(observation, model_name, noise):
     """Example of running inference with PyTorch Pi0 model."""
     logger.info("\n=== PyTorch Pi0 Inference Example ===")
 
@@ -97,29 +107,11 @@ def run_pytorch_inference_example():
         from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
         from openpi.policies.policy import Policy
 
-        # Create model configuration (same as JAX)
-        config = Pi0Config(
-            action_dim=32,
-            action_horizon=50,
-            max_token_len=48,
-        )
-
-        # Create PyTorch model
-        model = PI0Pytorch(config)
-
-        # Create policy with PyTorch backend
-        policy = Policy(
-            model=model,
-            device="cpu",  # Use "cuda" if GPU is available
-            sample_kwargs={"num_steps": 10},
-            is_pytorch=True,  # Explicitly specify PyTorch backend
-        )
-
-        # Create test observation
-        observation = create_example_observation()
-
-        # Optional: provide custom noise for deterministic results
-        noise = np.random.randn(config.action_horizon, config.action_dim).astype(np.float32)
+        config = _config.get_config(model_name)
+        checkpoint_dir = f"/home/jasonlu/.cache/openpi/openpi-assets/checkpoints/{model_name}_pytorch2"
+        
+        # Create trained policy
+        policy = _policy_config.create_trained_policy(config, checkpoint_dir, is_pytorch=True)
 
         # Run inference
         logger.info("Running PyTorch inference...")
@@ -154,12 +146,20 @@ def compare_results(jax_result, pytorch_result):
     logger.info("Actions comparison:")
     logger.info(f"  - Max absolute difference: {max_diff:.6f}")
     logger.info(f"  - Mean absolute difference: {mean_diff:.6f}")
+    
+    # Additional diagnostic info
+    logger.info(f"  - JAX actions stats: min={jax_result['actions'].min():.6f}, max={jax_result['actions'].max():.6f}, mean={jax_result['actions'].mean():.6f}")
+    logger.info(f"  - PyTorch actions stats: min={pytorch_result['actions'].min():.6f}, max={pytorch_result['actions'].max():.6f}, mean={pytorch_result['actions'].mean():.6f}")
 
-    # Check if results are close
+    # Check if results are close with different tolerances
     if np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-5, atol=1e-6):
-        logger.info("✅ Results match within tolerance!")
+        logger.info("✅ Results match within strict tolerance!")
+    elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-4, atol=1e-5):
+        logger.info("⚠️  Results match within moderate tolerance (rtol=1e-4, atol=1e-5)")
+    elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-3, atol=1e-4):
+        logger.info("⚠️  Results match within loose tolerance (rtol=1e-3, atol=1e-4)")
     else:
-        logger.warning("❌ Results differ significantly!")
+        logger.warning("❌ Results differ significantly even with loose tolerance!")
 
     # Compare timing
     jax_time = jax_result["policy_timing"]["infer_ms"]
@@ -172,6 +172,12 @@ def compare_results(jax_result, pytorch_result):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run inference with both JAX and PyTorch Pi0 models")
+    parser.add_argument("--model_name", type=str, default="pi0_aloha_sim", 
+                       choices=["pi0_aloha_sim", "pi0_aloha_towel", "pi0_base"],
+                       help="Model name to use")
+    args = parser.parse_args()
+
     """Run both inference examples and compare results."""
     logger.info("Pi0 Model Inference Comparison")
     logger.info("=" * 50)
@@ -179,14 +185,16 @@ def main():
     # Set random seed for reproducibility
     np.random.seed(42)
 
+    observation = create_example_data(args.model_name)
+
     # Run JAX inference
-    jax_result = run_jax_inference_example()
+    jax_result, noise = run_jax_inference_example(observation, args.model_name)
 
     # Reset random seed for fair comparison
     np.random.seed(42)
 
     # Run PyTorch inference
-    pytorch_result = run_pytorch_inference_example()
+    pytorch_result = run_pytorch_inference_example(observation, args.model_name, noise)
 
     # Compare results
     compare_results(jax_result, pytorch_result)

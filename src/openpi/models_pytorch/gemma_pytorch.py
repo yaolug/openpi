@@ -2,46 +2,113 @@ from pytest import Cache
 import torch
 from torch import nn
 import torch.version
-from transformers import Gemma3ForConditionalGeneration
-from transformers import GemmaForCausalLM
+# from transformers import Gemma3ForConditionalGeneration
+from transformers import GemmaForCausalLM, PaliGemmaForConditionalGeneration
 from transformers import PreTrainedModel
 
+import openpi.models.gemma as _gemma
 from openpi.models import gemma as gemma_jax
 
+from transformers.models.auto import CONFIG_MAPPING
 
-class PaliGemmaWithExpertModel(PreTrainedModel):
-    def __init__(self, config: gemma_jax.Config):
-        super().__init__(config=config)
-        self.config = config
-        # self.paligemma = PaliGemmaForConditionalGeneration(config=config.paligemma_config)
-        self.paligemma = Gemma3ForConditionalGeneration.from_pretrained("TODO Yao Lu")
-        self.paligemma.vision_tower.position_embedding = nn.Embedding(1024, 1152)
-        self.gemma_expert = GemmaForCausalLM(config=config.gemma_expert_config)
+
+class PaliGemmaWithExpertModel(nn.Module):
+    def __init__(self, vlm_config, action_expert_config):
+        super().__init__()
+
+        # TODO simplify config, to get the config from the name and then override necessary fields
+        # maybe only need to override the fields in action expert
+        vlm_config = CONFIG_MAPPING["paligemma"](
+                transformers_version="4.48.1",
+                _vocab_size=257152,
+                bos_token_id=2,
+                eos_token_id=1,
+                hidden_size=2048,
+                image_token_index=257152,
+                model_type="paligemma",
+                pad_token_id=0,
+                projection_dim=2048,
+                text_config={
+                    "hidden_activation": "gelu_pytorch_tanh",
+                    "hidden_size": vlm_config.width,
+                    "intermediate_size": vlm_config.mlp_dim,
+                    "model_type": "gemma",
+                    "num_attention_heads": vlm_config.num_heads,
+                    "head_dim": vlm_config.head_dim,
+                    "num_hidden_layers": vlm_config.depth,
+                    "num_image_tokens": 256,
+                    "num_key_value_heads": vlm_config.num_kv_heads,
+                    "torch_dtype": "float32",
+                    "vocab_size": 257152,
+                },
+                vision_config={
+                    "hidden_size": 1152,
+                    "intermediate_size": 4304,
+                    "model_type": "siglip_vision_model",
+                    "num_attention_heads": 16,
+                    "num_hidden_layers": 27,
+                    "num_image_tokens": 256,
+                    "patch_size": 14,
+                    "projection_dim": 2048,
+                    "projector_hidden_act": "gelu_fast",
+                    "torch_dtype": "float32",
+                    "vision_use_head": False,
+                },
+            )
+        action_expert_config = CONFIG_MAPPING["gemma"](
+                attention_bias=False,
+                attention_dropout=0.0,
+                bos_token_id=2,
+                eos_token_id=1,
+                head_dim=action_expert_config.head_dim,
+                hidden_act="gelu_pytorch_tanh",
+                hidden_activation="gelu_pytorch_tanh",
+                hidden_size=action_expert_config.width,
+                initializer_range=0.02,
+                intermediate_size=action_expert_config.mlp_dim,
+                max_position_embeddings=8192,
+                model_type="gemma",
+                num_attention_heads=action_expert_config.num_heads,
+                num_hidden_layers=action_expert_config.depth,
+                num_key_value_heads=action_expert_config.num_kv_heads,
+                pad_token_id=0,
+                rms_norm_eps=1e-06,
+                rope_theta=10000.0,
+                torch_dtype="float32",
+                transformers_version="4.48.1",
+                use_cache=True,
+                vocab_size=257152,
+            )
+
+        # TODO convert to pytorch config
+
+        self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config)
+        self.gemma_expert = GemmaForCausalLM(config=action_expert_config)
         # Remove unused embed_tokens
         self.gemma_expert.model.embed_tokens = None
 
         self.to_bfloat16_like_physical_intelligence()
-        self.set_requires_grad()
+        # self.set_requires_grad()
 
-    def set_requires_grad(self):
-        if self.config.freeze_vision_encoder:
-            self.paligemma.vision_tower.eval()
-            for params in self.paligemma.vision_tower.parameters():
-                params.requires_grad = False
+    # def set_requires_grad(self):
+    #     if self.config.freeze_vision_encoder:
+    #         self.paligemma.vision_tower.eval()
+    #         for params in self.paligemma.vision_tower.parameters():
+    #             params.requires_grad = False
 
-        if self.config.train_expert_only:
-            self.paligemma.eval()
-            for params in self.paligemma.parameters():
-                params.requires_grad = False
+    #     if self.config.train_expert_only:
+    #         self.paligemma.eval()
+    #         for params in self.paligemma.parameters():
+    #             params.requires_grad = False
 
-    def train(self, mode: bool = True):
-        super().train(mode)
+    # def train(self, mode: bool = True):
+    #     super().train(mode)
 
-        if self.config.freeze_vision_encoder:
-            self.paligemma.vision_tower.eval()
+    #     if self.config.freeze_vision_encoder:
+    #         self.paligemma.vision_tower.eval()
 
-        if self.config.train_expert_only:
-            self.paligemma.eval()
+    #     if self.config.train_expert_only:
+    #         self.paligemma.eval()
 
     def to_bfloat16_like_physical_intelligence(self):
         self.paligemma = self.paligemma.to(dtype=torch.bfloat16)
@@ -75,16 +142,27 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         use_cache: bool | None = None,
         fill_kv_cache: bool | None = None,
     ):
+        # Handle past_key_values: if it's a list of [prefix_kv, suffix_kv], extract them
+        if past_key_values is not None and isinstance(past_key_values, list) and len(past_key_values) == 2:
+            prefix_past_kv = past_key_values[0]
+            suffix_past_kv = past_key_values[1]
+        else:
+            # For initial call or when past_key_values is None/Cache object
+            prefix_past_kv = past_key_values
+            suffix_past_kv = past_key_values
+
         if inputs_embeds[0] is not None:
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_values=prefix_past_kv,
                 use_cache=use_cache,
             )
             prefix_past_key_values = prefix_output.past_key_values
+            prefix_output = prefix_output.last_hidden_state
         else:
+            prefix_output = None
             prefix_past_key_values = None
 
         if inputs_embeds[1] is not None:
@@ -92,20 +170,16 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_values=suffix_past_kv,
                 use_cache=use_cache,
             )
             suffix_past_key_values = suffix_output.past_key_values
+            suffix_output = suffix_output.last_hidden_state
         else:
+            suffix_output = None
             suffix_past_key_values = None
 
-        if fill_kv_cache:
-            if prefix_past_key_values is None:
-                prefix_past_key_values = prefix_output.past_key_values
-            if suffix_past_key_values is None:
-                suffix_past_key_values = suffix_output.past_key_values
-
-        return [prefix_output.last_hidden_state, suffix_output.last_hidden_state], [
+        return [prefix_output, suffix_output], [
             prefix_past_key_values,
             suffix_past_key_values,
         ]

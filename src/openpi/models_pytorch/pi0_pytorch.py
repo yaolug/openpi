@@ -4,10 +4,21 @@ import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
-from transformers import PreTrainedPolicy
+from transformers import PreTrainedModel
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
+
+
+def get_safe_dtype(target_dtype, device_type):
+    """Get a safe dtype for the given device type."""
+    if device_type == "cpu":
+        # CPU doesn't support bfloat16, use float32 instead
+        if target_dtype == torch.bfloat16:
+            return torch.float32
+        elif target_dtype == torch.float64:
+            return torch.float64
+    return target_dtype
 
 
 def create_sinusoidal_pos_embedding(
@@ -70,7 +81,7 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks
 
 
-class PI0Pytorch(PreTrainedPolicy):
+class PI0Pytorch(nn.Module):
     """
     π0: A Vision-Language-Action Flow Model for General Robot Control
 
@@ -83,15 +94,16 @@ class PI0Pytorch(PreTrainedPolicy):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        paligemma_config = _gemma.get_config(config.paligemma_variant)  # TODO
-        action_expert_config = _gemma.get_config(config.action_expert_variant)  # TODO
 
-        paligemma_with_export_config = PaliGemmaWithExpertConfig(
-            freeze_vision_encoder=self.config.freeze_vision_encoder,
-            train_expert_only=self.config.train_expert_only,
-            attention_implementation=self.config.attention_implementation,
-        )
-        self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_with_export_config)
+        # paligemma_with_export_config = PaliGemmaWithExpertConfig(
+        #     freeze_vision_encoder=self.config.freeze_vision_encoder,
+        #     train_expert_only=self.config.train_expert_only,
+        #     attention_implementation=self.config.attention_implementation,
+        # )
+        paligemma_config = _gemma.get_config(config.paligemma_variant)
+        action_expert_config = _gemma.get_config(config.action_expert_variant)
+
+        self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config)
 
         # Projections are float32
         self.state_proj = nn.Linear(self.config.action_dim, action_expert_config.width)
@@ -101,11 +113,11 @@ class PI0Pytorch(PreTrainedPolicy):
         self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
         self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
-        self.set_requires_grad()
+    #     self.set_requires_grad()
 
-    def set_requires_grad(self):
-        for params in self.state_proj.parameters():
-            params.requires_grad = self.config.train_state_proj
+    # def set_requires_grad(self):
+    #     for params in self.state_proj.parameters():
+    #         params.requires_grad = self.config.train_state_proj
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -200,7 +212,7 @@ class PI0Pytorch(PreTrainedPolicy):
 
         # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = create_sinusoidal_pos_embedding(
-            timestep, self.config.proj_width, min_period=4e-3, max_period=4.0, device=device
+            timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=device
         )
         time_emb = time_emb.type(dtype=dtype)
 
@@ -225,7 +237,7 @@ class PI0Pytorch(PreTrainedPolicy):
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.n_action_steps - 1))
+        att_masks += [1] + ([0] * (self.config.action_horizon - 1))
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -266,7 +278,7 @@ class PI0Pytorch(PreTrainedPolicy):
             use_cache=False,
             fill_kv_cache=False,
         )
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        suffix_out = suffix_out[:, -self.config.action_horizon :]
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
@@ -274,14 +286,65 @@ class PI0Pytorch(PreTrainedPolicy):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
-    def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
+    def sample_actions(self, observation, noise=None, num_steps=10) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
-        bsize = state.shape[0]
-        device = state.device
+        bsize = observation['state'].shape[0]
+        device = observation['state'].device
 
         if noise is None:
-            actions_shape = (bsize, self.config.n_action_steps, self.config.max_action_dim)
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
+
+        # TODO preprocess_observation
+        # Observation(
+        #     images=out_images,
+        #     image_masks=out_masks,
+        #     state=observation.state,
+        #     tokenized_prompt=observation.tokenized_prompt,
+        #     tokenized_prompt_mask=observation.tokenized_prompt_mask,
+        #     token_ar_mask=observation.token_ar_mask,
+        #     token_loss_mask=observation.token_loss_mask,
+        # )
+
+        for key in observation['image']:
+            import numpy as np
+            if observation["image"][key].dtype == np.uint8:
+                observation["image"][key] = observation["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+
+        # TODO: Move this after input_transform
+        images = []
+        for img in observation['image'].values():
+            img_tensor = torch.from_numpy(np.array(img))
+            
+            # Handle different input formats
+            if img_tensor.dim() == 4:  # (batch, H, W, C) -> (batch, C, H, W)
+                img_tensor = img_tensor.permute(0, 3, 1, 2)
+            elif img_tensor.dim() == 3:  # (H, W, C) -> (C, H, W) -> (1, C, H, W)
+                img_tensor = img_tensor.permute(2, 0, 1)  # -> (C, H, W)
+                img_tensor = img_tensor.unsqueeze(0)  # -> (1, C, H, W)
+            
+            # Ensure correct device and dtype
+            img_tensor = img_tensor.to(device=next(self.paligemma_with_expert.parameters()).device, 
+                                     dtype=torch.float32)
+            images.append(img_tensor)
+        
+        img_masks = []
+        for mask in observation['image_mask'].values():
+            mask_tensor = torch.from_numpy(np.array(mask))
+            # Ensure mask has batch dimension
+            if mask_tensor.dim() == 0:
+                mask_tensor = mask_tensor.unsqueeze(0)
+            mask_tensor = mask_tensor.to(device=next(self.paligemma_with_expert.parameters()).device)
+            img_masks.append(mask_tensor)
+        
+        lang_tokens = torch.from_numpy(np.array(observation['tokenized_prompt']))
+        lang_masks = torch.from_numpy(np.array(observation['tokenized_prompt_mask']))
+        state = torch.from_numpy(np.array(observation['state']))
+        
+        # Move language tokens and state to correct device
+        lang_tokens = lang_tokens.to(device=next(self.paligemma_with_expert.parameters()).device)
+        lang_masks = lang_masks.to(device=next(self.paligemma_with_expert.parameters()).device)
+        state = state.to(device=next(self.paligemma_with_expert.parameters()).device)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
@@ -296,15 +359,16 @@ class PI0Pytorch(PreTrainedPolicy):
             position_ids=prefix_position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, None],
-            use_cache=self.config.use_cache,
+            use_cache=True,
             fill_kv_cache=True,
         )
 
-        dt = -1.0 / self.config.num_steps
-        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+        dt = -1.0 / num_steps
+        model_device = next(self.paligemma_with_expert.parameters()).device
+        dt = torch.tensor(dt, dtype=torch.float32, device=model_device)
 
         x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        time = torch.tensor(1.0, dtype=torch.float32, device=model_device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
             v_t = self.denoise_step(
@@ -346,9 +410,15 @@ class PI0Pytorch(PreTrainedPolicy):
         # Adjust the attention mask to match the expected sequence length
         if past_key_values is not None:
             # Get the actual key length from past_key_values
-            past_seq_len = past_key_values[0][0].shape[
-                2
-            ]  # past_key_values[layer][key/value][batch, heads, seq_len, head_dim]
+            # past_key_values is [prefix_past_key_values, suffix_past_key_values]
+            # We want the prefix past_key_values: past_key_values[0]
+            # Then access layer 0, keys tensor: past_key_values[0][0][0]
+            # Format: [prefix/suffix][layer][key/value][batch, heads, seq_len, head_dim]
+            if past_key_values[0] is not None and len(past_key_values[0]) > 0:
+                past_seq_len = past_key_values[0][0][0].shape[2]
+            else:
+                # Fallback: if prefix is None, try suffix
+                past_seq_len = past_key_values[1][0][0].shape[2] if past_key_values[1] is not None else 0
             current_seq_len = full_att_2d_masks.shape[2]
             expected_seq_len = past_seq_len + suffix_len
 
@@ -371,11 +441,11 @@ class PI0Pytorch(PreTrainedPolicy):
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
-            use_cache=self.config.use_cache,
+            use_cache=True,
             fill_kv_cache=False,
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         return v_t
