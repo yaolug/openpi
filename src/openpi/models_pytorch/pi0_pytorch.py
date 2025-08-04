@@ -145,6 +145,19 @@ class PI0Pytorch(nn.Module):
         pad_masks = []
         att_masks = []
 
+        # Debug: Print PyTorch SigLIP model config and weights
+        print(f"[PyTorch DEBUG] SigLIP Model Info:")
+        vision_model = self.paligemma_with_expert.paligemma.vision_tower
+        print(f"  - Vision model type: {type(vision_model)}")
+        print(f"  - Vision model config: {vision_model.config}")
+        
+        # Print some key weights
+        print(f"  - Vision model weights:")
+        for name, param in vision_model.named_parameters():
+            if "embed" in name or "patch" in name or "conv" in name:
+                print(f"    {name}: {param.shape}, mean={param.mean():.6f}, std={param.std():.6f}")
+                break  # Just print first few
+        
         # TODO: remove for loop
         for (
             img,
@@ -153,7 +166,7 @@ class PI0Pytorch(nn.Module):
             img_emb = self.paligemma_with_expert.embed_image(img)
             img_emb = img_emb.to(dtype=torch.bfloat16)
 
-            # Normalize image embeddings
+            # TODO: why we need to do this?
             img_emb_dim = img_emb.shape[-1]
             img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
 
@@ -168,7 +181,6 @@ class PI0Pytorch(nn.Module):
 
         lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
 
-        # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
         lang_emb = lang_emb * math.sqrt(lang_emb_dim)
 
@@ -187,6 +199,17 @@ class PI0Pytorch(nn.Module):
         bsize = pad_masks.shape[0]
 
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+
+        # Debug: embed_prefix outputs
+        print(f"[PyTorch DEBUG] embed_prefix outputs:")
+        print(f"  - embs shape: {embs.shape}")
+        print(f"  - pad_masks shape: {pad_masks.shape}")
+        print(f"  - att_masks shape: {att_masks.shape}")
+        print(f"  - embs stats: min={embs.min():.6f}, max={embs.max():.6f}, mean={embs.mean():.6f}")
+        # Debug: Print first 5 elements of first batch's embeddings
+        print(f"[PyTorch DEBUG] First 5 elements of first batch's embeddings:")
+        print(f"  {embs[0, 0:5, 0:5]}")
+        print(f"  {embs[0, 769:775, 0:5]}")
 
         return embs, pad_masks, att_masks
 
@@ -286,6 +309,7 @@ class PI0Pytorch(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
+    @torch.no_grad()
     def sample_actions(self, observation, noise=None, num_steps=10) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation['state'].shape[0]
@@ -346,6 +370,12 @@ class PI0Pytorch(nn.Module):
         lang_masks = lang_masks.to(device=next(self.paligemma_with_expert.parameters()).device)
         state = state.to(device=next(self.paligemma_with_expert.parameters()).device)
 
+        print(f"[PyTorch DEBUG] images: {images}")
+        print(f"[PyTorch DEBUG] img_masks: {img_masks}")
+        print(f"[PyTorch DEBUG] lang_tokens: {lang_tokens}")
+        print(f"[PyTorch DEBUG] lang_masks: {lang_masks}")
+        print(f"[PyTorch DEBUG] state: {state}")
+
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
@@ -362,6 +392,20 @@ class PI0Pytorch(nn.Module):
             use_cache=True,
             fill_kv_cache=True,
         )
+        
+        # Debug: past_key_values after paligemma_with_expert.forward
+        print(f"[PyTorch DEBUG] past_key_values after paligemma_with_expert.forward:")
+        print(f"  - past_key_values type: {type(past_key_values)}")
+        if past_key_values is not None:
+            if isinstance(past_key_values, list) and len(past_key_values) == 2:
+                print(f"  - prefix_past_key_values: {type(past_key_values[0])}")
+                if past_key_values[0] is not None and len(past_key_values[0]) > 0:
+                    print(f"    - first layer keys shape: {past_key_values[0][0][0].shape}")
+                print(f"  - suffix_past_key_values: {type(past_key_values[1])}")
+            else:
+                print(f"  - unexpected format: {past_key_values}")
+        else:
+            print(f"  - past_key_values is None")
 
         dt = -1.0 / num_steps
         model_device = next(self.paligemma_with_expert.parameters()).device
@@ -448,4 +492,12 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
+        
+        # Debug: diffusion model output
+        print(f"[PyTorch DEBUG] diffusion model output:")
+        print(f"  - suffix_out shape: {suffix_out.shape}")
+        print(f"  - suffix_out stats: min={suffix_out.min():.6f}, max={suffix_out.max():.6f}, mean={suffix_out.mean():.6f}")
+        print(f"  - v_t (action output) shape: {v_t.shape}")
+        print(f"  - v_t stats: min={v_t.min():.6f}, max={v_t.max():.6f}, mean={v_t.mean():.6f}")
+        
         return v_t

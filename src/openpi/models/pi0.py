@@ -125,6 +125,18 @@ class Pi0(_model.BaseModel):
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
+        
+        # Debug: embed_prefix outputs using jax.debug.print
+        jax.debug.print("[JAX DEBUG] embed_prefix outputs:")
+        jax.debug.print("  - tokens shape: {}", tokens.shape)
+        jax.debug.print("  - input_mask shape: {}", input_mask.shape)
+        jax.debug.print("  - ar_mask shape: {}", ar_mask.shape)
+        jax.debug.print("  - tokens stats: min={}, max={}, mean={}", jnp.min(tokens), jnp.max(tokens), jnp.mean(tokens))
+        # Debug: Print first 5 elements of first batch's embeddings using jax.debug.print
+        jax.debug.print("[JAX DEBUG] First 5 elements of first batch's embeddings:")
+        jax.debug.print("  {}", tokens[0, 0:5, 0:5])
+        jax.debug.print("  {}", tokens[0, 769:775, 0:5])
+        
         return tokens, input_mask, ar_mask
 
     @at.typecheck
@@ -235,10 +247,20 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, model_action_dim))
 
         # first fill KV cache with a forward pass of the prefix
+        jax.debug.print("observation: {}", observation)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        
+        # Debug: past_key_values (kv_cache) after PaliGemma.llm
+        jax.debug.print("[JAX DEBUG] past_key_values (kv_cache) after PaliGemma.llm:")
+        if kv_cache is not None:
+            jax.debug.print("  - kv_cache has {} layers", len(kv_cache))
+            if len(kv_cache) > 0:
+                jax.debug.print("    - first layer keys shape: {}", kv_cache[0][0].shape)
+        else:
+            jax.debug.print("  - kv_cache is None")
 
         def step(carry):
             x_t, time = carry
@@ -267,6 +289,15 @@ class Pi0(_model.BaseModel):
             )
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            
+            # Debug: diffusion model output (print every step for now)
+            jax.debug.print("[JAX DEBUG] diffusion model output:")
+            jax.debug.print("  - suffix_out shape: {}", suffix_out.shape)
+            jax.debug.print("  - suffix_out stats: min={}, max={}, mean={}", 
+                            jnp.min(suffix_out), jnp.max(suffix_out), jnp.mean(suffix_out))
+            jax.debug.print("  - v_t (action output) shape: {}", v_t.shape)
+            jax.debug.print("  - v_t stats: min={}, max={}, mean={}", 
+                            jnp.min(v_t), jnp.max(v_t), jnp.mean(v_t))
 
             return x_t + dt * v_t, time + dt
 

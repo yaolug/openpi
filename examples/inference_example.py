@@ -97,7 +97,6 @@ def run_jax_inference_example(observation, model_name):
         logger.error(f"Failed to run JAX inference: {e}")
         return None
 
-
 def run_pytorch_inference_example(observation, model_name, noise):
     """Example of running inference with PyTorch Pi0 model."""
     logger.info("\n=== PyTorch Pi0 Inference Example ===")

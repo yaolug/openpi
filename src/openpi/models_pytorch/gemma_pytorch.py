@@ -90,6 +90,11 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.to_bfloat16_like_physical_intelligence()
         # self.set_requires_grad()
 
+        # TODO: remove the following 3 lines
+        self.paligemma.vision_tower.eval()
+        self.paligemma.eval()
+        self.gemma_expert.eval()
+
     # def set_requires_grad(self):
     #     if self.config.freeze_vision_encoder:
     #         self.paligemma.vision_tower.eval()
