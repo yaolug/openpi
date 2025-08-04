@@ -106,9 +106,9 @@ class PI0Pytorch(nn.Module):
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config)
 
         # Projections are float32
-        self.state_proj = nn.Linear(self.config.action_dim, action_expert_config.width)
-        self.action_in_proj = nn.Linear(self.config.action_dim, action_expert_config.width)
-        self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
+        self.state_proj = nn.Linear(32, action_expert_config.width)
+        self.action_in_proj = nn.Linear(32, action_expert_config.width)
+        self.action_out_proj = nn.Linear(action_expert_config.width, 32)
 
         self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
         self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
@@ -369,12 +369,6 @@ class PI0Pytorch(nn.Module):
         lang_tokens = lang_tokens.to(device=next(self.paligemma_with_expert.parameters()).device)
         lang_masks = lang_masks.to(device=next(self.paligemma_with_expert.parameters()).device)
         state = state.to(device=next(self.paligemma_with_expert.parameters()).device)
-
-        print(f"[PyTorch DEBUG] images: {images}")
-        print(f"[PyTorch DEBUG] img_masks: {img_masks}")
-        print(f"[PyTorch DEBUG] lang_tokens: {lang_tokens}")
-        print(f"[PyTorch DEBUG] lang_masks: {lang_masks}")
-        print(f"[PyTorch DEBUG] state: {state}")
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)

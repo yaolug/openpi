@@ -174,8 +174,7 @@ def slice_paligemma_state_dict(state_dict, config):
     jax_key = f"llm/embedder/input_embedding{suffix}"
     pytorch_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
     print(f"  {jax_key} -> {pytorch_key}")
-    embedding_vector = state_dict.pop(jax_key)
-    state_dict[pytorch_key] = embedding_vector
+    state_dict[pytorch_key] = state_dict.pop(jax_key)
 
     # pop the einsum attention + mlp representations
     print(f"\n🧠 Extracting language model parameters...")
@@ -224,9 +223,9 @@ def slice_paligemma_state_dict(state_dict, config):
     print(f"  {jax_key} -> {pytorch_key}")
     state_dict[pytorch_key] = state_dict.pop(jax_key)
     
-    pytorch_key = "paligemma_with_expert.paligemma.lm_head.weight"
-    print(f"  embedding_vector (tied weights) -> {pytorch_key}")
-    state_dict[pytorch_key] = embedding_vector # weights are tied.
+    # pytorch_key = "paligemma_with_expert.paligemma.lm_head.weight"
+    # print(f"  embedding_vector (tied weights) -> {pytorch_key}")
+    # state_dict[pytorch_key] = embedding_vector # weights are tied.
 
     expert_dict = {}
     final_state_dict = {}
@@ -241,6 +240,7 @@ def slice_paligemma_state_dict(state_dict, config):
             f"llm/layers/pre_attention_norm_1/scale{suffix}",
             f"llm/layers/pre_ffw_norm_1/scale{suffix}",
         ]:
+            print(f"[PyTorch DEBUG] key: {key}")
             final_state_dict[key] = torch.from_numpy(value)
         else:
             expert_dict[key] = value
@@ -261,9 +261,6 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1):
         config.num_hidden_layers = config.depth
     if not hasattr(config, 'num_attention_heads'):
         config.num_attention_heads = config.num_heads
-    
-    embedding_vector = torch.zeros([config.vocab_size, config.hidden_size])
-    state_dict["paligemma_with_expert.gemma_expert.model.embed_tokens.weight"] = embedding_vector
 
     suffix = "/value" if f"llm/layers/attn/attn_vec_einsum_{num_expert}/w/value" in state_dict else ""
 
@@ -304,7 +301,7 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1):
         state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.weight"] = llm_post_attention_layernorm[i]
 
     state_dict["paligemma_with_expert.gemma_expert.model.norm.weight"] = state_dict.pop(f"llm/final_norm_{num_expert}/scale{suffix}")
-    state_dict["paligemma_with_expert.gemma_expert.lm_head.weight"] = embedding_vector # weights are tied.
+    #state_dict["paligemma_with_expert.gemma_expert.lm_head.weight"] = embedding_vector # weights are tied.
 
     final_state_dict = {}
     for key, value in state_dict.items():
@@ -458,6 +455,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     
     # Break down orbax ckpts
     initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir)
+    print(f"[PyTorch DEBUG] initial_params: {initial_params.keys()}")
     
     # Process projection params
     print(f"\n🎯 Converting projection parameters...")
@@ -646,7 +644,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     
     # Load state dict
     try:
-        pi0_model.load_state_dict(all_params, strict=False)
+        pi0_model.load_state_dict(all_params)
         print(f"  ✅ Successfully loaded parameters into model")
     except Exception as e:
         print(f"  ⚠️ Warning: Could not load all parameters: {e}")

@@ -247,11 +247,15 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, model_action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        jax.debug.print("observation: {}", observation)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        outputs_embeds, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        prefix_out = outputs_embeds[0]
+        jax.debug.print("[JAX DEBUG] prefix_out: {}", prefix_out.shape)
+        jax.debug.print("[JAX DEBUG] prefix_out stats: min={}, max={}, mean={}", 
+                        jnp.min(prefix_out), jnp.max(prefix_out), jnp.mean(prefix_out))
         
         # Debug: past_key_values (kv_cache) after PaliGemma.llm
         jax.debug.print("[JAX DEBUG] past_key_values (kv_cache) after PaliGemma.llm:")
