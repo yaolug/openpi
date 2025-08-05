@@ -132,6 +132,13 @@ class Pi0(_model.BaseModel):
         jax.debug.print("  - input_mask shape: {}", input_mask.shape)
         jax.debug.print("  - ar_mask shape: {}", ar_mask.shape)
         jax.debug.print("  - tokens stats: min={}, max={}, mean={}", jnp.min(tokens), jnp.max(tokens), jnp.mean(tokens))
+
+        # Print mean of tokens along sequence length dimension using jax.debug.print
+        # jax.debug.print("[JAX DEBUG] Mean tokens across sequence length:")
+        # import numpy as np
+        # np.set_printoptions(threshold=np.inf)
+        # jax.debug.print("  {}", jnp.mean(tokens, axis=1)[0, :])  # First batch
+        # np.set_printoptions(threshold=1000)
         # Debug: Print first 5 elements of first batch's embeddings using jax.debug.print
         jax.debug.print("[JAX DEBUG] First 5 elements of first batch's embeddings:")
         jax.debug.print("  {}", tokens[0, 0:5, 0:5])
@@ -252,10 +259,17 @@ class Pi0(_model.BaseModel):
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
 
         outputs_embeds, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        prefix_out = outputs_embeds[0]
-        jax.debug.print("[JAX DEBUG] prefix_out: {}", prefix_out.shape)
-        jax.debug.print("[JAX DEBUG] prefix_out stats: min={}, max={}, mean={}", 
-                        jnp.min(prefix_out), jnp.max(prefix_out), jnp.mean(prefix_out))
+        # prefix_out = outputs_embeds[0]
+        # jax.debug.print("[JAX DEBUG] prefix_out: {}", prefix_out.shape)
+        # jax.debug.print("[JAX DEBUG] prefix_out stats: min={}, max={}, mean={}", 
+        #                 jnp.min(prefix_out), jnp.max(prefix_out), jnp.mean(prefix_out))
+        # # Print mean of prefix_out along sequence length dimension (dim=1)
+        # import numpy as np
+        # np.set_printoptions(threshold=np.inf)
+        # prefix_mean = jnp.mean(prefix_out, axis=1)
+        # jax.debug.print("[JAX DEBUG] prefix_out mean along seq_len:")
+        # jax.debug.print("  {}", prefix_mean[0, :])
+        # np.set_printoptions(threshold=30)
         
         # Debug: past_key_values (kv_cache) after PaliGemma.llm
         jax.debug.print("[JAX DEBUG] past_key_values (kv_cache) after PaliGemma.llm:")
@@ -271,6 +285,11 @@ class Pi0(_model.BaseModel):
             suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
+
+            jax.debug.print("[JAX DEBUG] suffix_tokens shape: {}", suffix_tokens.shape)
+            jax.debug.print("[JAX DEBUG] suffix_tokens stats: min={}, max={}, mean={}", 
+                            jnp.min(suffix_tokens), jnp.max(suffix_tokens), jnp.mean(suffix_tokens))
+
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
@@ -291,6 +310,9 @@ class Pi0(_model.BaseModel):
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens], mask=full_attn_mask, positions=positions, kv_cache=kv_cache
             )
+            jax.debug.print("[JAX DEBUG] suffix_out shape: {}", suffix_out.shape)
+            jax.debug.print("[JAX DEBUG] suffix_out stats: min={}, max={}, mean={}", 
+                            jnp.min(suffix_out), jnp.max(suffix_out), jnp.mean(suffix_out))
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
             

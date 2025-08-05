@@ -5,7 +5,6 @@ Example script showing how to run inference with both JAX and PyTorch Pi0 models
 This demonstrates the basic usage patterns for both implementations.
 """
 
-import logging
 import argparse
 import numpy as np
 import jax
@@ -13,11 +12,6 @@ import jax.numpy as jnp
 from openpi.policies import policy_config as _policy_config
 from openpi.training import config as _config
 from openpi.shared import download
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 
 def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
     """Create example input data matching the expected format."""
@@ -61,7 +55,7 @@ def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
 
 def run_jax_inference_example(observation, model_name):
     """Example of running inference with JAX Pi0 model."""
-    logger.info("=== JAX Pi0 Inference Example ===")
+    print("=== JAX Pi0 Inference Example ===")
 
     try:
         import jax
@@ -82,24 +76,24 @@ def run_jax_inference_example(observation, model_name):
         policy._rng = rng_key
 
         # Run inference
-        logger.info("Running JAX inference...")
+        print("Running JAX inference...")
         result = policy.infer(observation, noise=noise_np)
 
         # Print results
-        logger.info("JAX inference completed!")
-        logger.info(f"  - Inference time: {result['policy_timing']['infer_ms']:.2f}ms")
-        logger.info(f"  - Actions shape: {result['actions'].shape}")
-        logger.info(f"  - Actions range: [{result['actions'].min():.3f}, {result['actions'].max():.3f}]")
+        print("JAX inference completed!")
+        print(f"  - Inference time: {result['policy_timing']['infer_ms']:.2f}ms")
+        print(f"  - Actions shape: {result['actions'].shape}")
+        print(f"  - Actions range: [{result['actions'].min():.3f}, {result['actions'].max():.3f}]")
 
         return result, noise_np
 
     except ImportError as e:
-        logger.error(f"Failed to run JAX inference: {e}")
+        print(f"Failed to run JAX inference: {e}")
         return None
 
 def run_pytorch_inference_example(observation, model_name, noise):
     """Example of running inference with PyTorch Pi0 model."""
-    logger.info("\n=== PyTorch Pi0 Inference Example ===")
+    print("\n=== PyTorch Pi0 Inference Example ===")
 
     try:
         from openpi.models.pi0_config import Pi0Config
@@ -113,61 +107,72 @@ def run_pytorch_inference_example(observation, model_name, noise):
         policy = _policy_config.create_trained_policy(config, checkpoint_dir, is_pytorch=True)
 
         # Run inference
-        logger.info("Running PyTorch inference...")
+        print("Running PyTorch inference...")
         result = policy.infer(observation, noise=noise)
 
         # Print results
-        logger.info("PyTorch inference completed!")
-        logger.info(f"  - Inference time: {result['policy_timing']['infer_ms']:.2f}ms")
-        logger.info(f"  - Actions shape: {result['actions'].shape}")
-        logger.info(f"  - Actions range: [{result['actions'].min():.3f}, {result['actions'].max():.3f}]")
+        print("PyTorch inference completed!")
+        print(f"  - Inference time: {result['policy_timing']['infer_ms']:.2f}ms")
+        print(f"  - Actions shape: {result['actions'].shape}")
+        print(f"  - Actions range: [{result['actions'].min():.3f}, {result['actions'].max():.3f}]")
 
         return result
 
     except ImportError as e:
-        logger.error(f"Failed to run PyTorch inference: {e}")
+        print(f"Failed to run PyTorch inference: {e}")
         return None
 
 
 def compare_results(jax_result, pytorch_result):
     """Compare results from both implementations."""
     if jax_result is None or pytorch_result is None:
-        logger.warning("Cannot compare results - one implementation failed")
+        print("Cannot compare results - one implementation failed")
         return
 
-    logger.info("\n=== Comparing Results ===")
+    print("\n=== Comparing Results ===")
 
     # Compare actions
     actions_diff = np.abs(jax_result["actions"] - pytorch_result["actions"])
     max_diff = np.max(actions_diff)
     mean_diff = np.mean(actions_diff)
 
-    logger.info("Actions comparison:")
-    logger.info(f"  - Max absolute difference: {max_diff:.6f}")
-    logger.info(f"  - Mean absolute difference: {mean_diff:.6f}")
+    print(f"JAX actions: {jax_result['actions'][0:2, :]}")
+    print(f"PyTorch actions: {pytorch_result['actions'][0:2, :]}")
+
+    print("Actions comparison:")
+    print(f"  - Max absolute difference: {max_diff:.6f}")
+    print(f"  - Mean absolute difference: {mean_diff:.6f}")
+
+    # Calculate relative differences
+    relative_diff = np.abs((jax_result["actions"] - pytorch_result["actions"]) / pytorch_result["actions"])
+    max_rel_diff = np.max(relative_diff)
+    mean_rel_diff = np.mean(relative_diff)
+
+    print(f"  - Max relative difference: {max_rel_diff:.6f}")
+    print(f"  - Mean relative difference: {mean_rel_diff:.6f}")
     
     # Additional diagnostic info
-    logger.info(f"  - JAX actions stats: min={jax_result['actions'].min():.6f}, max={jax_result['actions'].max():.6f}, mean={jax_result['actions'].mean():.6f}")
-    logger.info(f"  - PyTorch actions stats: min={pytorch_result['actions'].min():.6f}, max={pytorch_result['actions'].max():.6f}, mean={pytorch_result['actions'].mean():.6f}")
+    print(f"  - JAX actions stats: min={jax_result['actions'].min():.6f}, max={jax_result['actions'].max():.6f}, mean={jax_result['actions'].mean():.6f}")
+    print(f"  - PyTorch actions stats: min={pytorch_result['actions'].min():.6f}, max={pytorch_result['actions'].max():.6f}, mean={pytorch_result['actions'].mean():.6f}")
 
     # Check if results are close with different tolerances
     if np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-5, atol=1e-6):
-        logger.info("✅ Results match within strict tolerance!")
+        print("✅ Results match within strict tolerance!")
     elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-4, atol=1e-5):
-        logger.info("⚠️  Results match within moderate tolerance (rtol=1e-4, atol=1e-5)")
-    elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-3, atol=1e-4):
-        logger.info("⚠️  Results match within loose tolerance (rtol=1e-3, atol=1e-4)")
+        print("⚠️  Results match within moderate tolerance (rtol=1e-4, atol=1e-5)")
+    elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-2, atol=1e-3):
+        print("⚠️  Results match within loose tolerance (rtol=1e-3, atol=1e-4)")
     else:
-        logger.warning("❌ Results differ significantly even with loose tolerance!")
+        print("❌ Results differ significantly even with loose tolerance!")
 
     # Compare timing
     jax_time = jax_result["policy_timing"]["infer_ms"]
     pytorch_time = pytorch_result["policy_timing"]["infer_ms"]
 
-    logger.info("Timing comparison:")
-    logger.info(f"  - JAX: {jax_time:.2f}ms")
-    logger.info(f"  - PyTorch: {pytorch_time:.2f}ms")
-    logger.info(f"  - Speedup: {jax_time / pytorch_time:.2f}x (JAX time / PyTorch time)")
+    print("Timing comparison:")
+    print(f"  - JAX: {jax_time:.2f}ms")
+    print(f"  - PyTorch: {pytorch_time:.2f}ms")
+    print(f"  - Speedup: {jax_time / pytorch_time:.2f}x (JAX time / PyTorch time)")
 
 
 def main():
@@ -178,8 +183,8 @@ def main():
     args = parser.parse_args()
 
     """Run both inference examples and compare results."""
-    logger.info("Pi0 Model Inference Comparison")
-    logger.info("=" * 50)
+    print("Pi0 Model Inference Comparison")
+    print("=" * 50)
 
     # Set random seed for reproducibility
     np.random.seed(42)
@@ -198,8 +203,8 @@ def main():
     # Compare results
     compare_results(jax_result, pytorch_result)
 
-    logger.info("\n" + "=" * 50)
-    logger.info("Example completed!")
+    print("\n" + "=" * 50)
+    print("Example completed!")
 
 
 if __name__ == "__main__":

@@ -6,36 +6,11 @@ import torch.version
 from transformers import GemmaForCausalLM, PaliGemmaForConditionalGeneration
 from transformers import PreTrainedModel
 
+
 import openpi.models.gemma as _gemma
 from openpi.models import gemma as gemma_jax
 
 from transformers.models.auto import CONFIG_MAPPING
-
-
-def apply_rope(x, positions, max_wavelength=10_000):
-    """
-    Applies RoPE positions [B, L] to x [B, L, H, D].
-    """
-    d_half = x.shape[-1] // 2
-    device = x.device
-    dtype = x.dtype
-    x = x.to(torch.float32)
-
-    freq_exponents = (2.0 / x.shape[-1]) * torch.arange(d_half, dtype=torch.float32, device=device)
-    timescale = max_wavelength**freq_exponents
-    radians = positions[..., None].to(torch.float32) / timescale[None, None, :].to(torch.float32)
-
-    radians = radians[..., None, :]
-
-    sin = torch.sin(radians)  # .to(dtype=dtype)
-    cos = torch.cos(radians)  # .to(dtype=dtype)
-
-    x1, x2 = x.split(d_half, dim=-1)
-    res = torch.empty_like(x)
-    res[..., :d_half] = x1 * cos - x2 * sin
-    res[..., d_half:] = x2 * cos + x1 * sin
-
-    return res.to(dtype)
 
 
 class PaliGemmaWithExpertModel(nn.Module):
@@ -163,248 +138,44 @@ class PaliGemmaWithExpertModel(nn.Module):
     def embed_language_tokens(self, tokens: torch.Tensor):
         return self.paligemma.language_model.embed_tokens(tokens)
 
-    # # TODO: break down this huge forward into modules or functions
-    # def forward(
-    #     self,
-    #     attention_mask: torch.Tensor | None = None,
-    #     position_ids: torch.LongTensor | None = None,
-    #     past_key_values: list[torch.FloatTensor] | Cache | None = None,
-    #     inputs_embeds: list[torch.FloatTensor] = None,
-    #     use_cache: bool | None = None,
-    #     fill_kv_cache: bool | None = None,
-    # ):
-    #     # Handle past_key_values: if it's a list of [prefix_kv, suffix_kv], extract them
-    #     if past_key_values is not None and isinstance(past_key_values, list) and len(past_key_values) == 2:
-    #         prefix_past_kv = past_key_values[0]
-    #         suffix_past_kv = past_key_values[1]
-    #     else:
-    #         # For initial call or when past_key_values is None/Cache object
-    #         prefix_past_kv = past_key_values
-    #         suffix_past_kv = past_key_values
-
-    #     if inputs_embeds[0] is not None:
-    #         prefix_output = self.paligemma.language_model.forward(
-    #             inputs_embeds=inputs_embeds[0],
-    #             attention_mask=attention_mask,
-    #             position_ids=position_ids,
-    #             past_key_values=prefix_past_kv,
-    #             use_cache=use_cache,
-    #         )
-    #         prefix_past_key_values = prefix_output.past_key_values
-    #         prefix_output = prefix_output.last_hidden_state
-    #     else:
-    #         prefix_output = None
-    #         prefix_past_key_values = None
-
-    #     if inputs_embeds[1] is not None:
-    #         suffix_output = self.gemma_expert.model.forward(
-    #             inputs_embeds=inputs_embeds[1],
-    #             attention_mask=attention_mask,
-    #             position_ids=position_ids,
-    #             past_key_values=suffix_past_kv,
-    #             use_cache=use_cache,
-    #         )
-    #         suffix_past_key_values = suffix_output.past_key_values
-    #         suffix_output = suffix_output.last_hidden_state
-    #     else:
-    #         suffix_output = None
-    #         suffix_past_key_values = None
-
-    #     return [prefix_output, suffix_output], [
-    #         prefix_past_key_values,
-    #         suffix_past_key_values,
-    #     ]
-
-
-
+    # TODO: break down this huge forward into modules or functions
     def forward(
         self,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
-        inputs_embeds: List[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | Cache | None = None,
+        inputs_embeds: list[torch.FloatTensor] = None,
+        use_cache: bool | None = None,
     ):
-        models = [self.paligemma.language_model, self.gemma_expert.model]
-
-        for hidden_states in inputs_embeds:
-            # TODO this is very inefficient
-            # dtype is always the same, batch size too (if > 1 len)
-            # device could be trickier in multi gpu edge cases but that's it
-            if hidden_states is None:
-                continue
-            batch_size = hidden_states.shape[0]
-
-        # RMSNorm
-        num_layers = self.paligemma.config.text_config.num_hidden_layers
-        head_dim = self.paligemma.config.text_config.head_dim
-        for layer_idx in range(num_layers):
-            query_states = []
-            key_states = []
-            value_states = []
-            for i, hidden_states in enumerate(inputs_embeds):
-                if hidden_states is None:
-                    continue
-                layer = models[i].layers[layer_idx]
-                # normalizer = torch.tensor(models[i].config.hidden_size**0.5, dtype=hidden_states.dtype)
-                # hidden_states = hidden_states * normalizer
-                hidden_states = layer.input_layernorm(hidden_states)
-
-                input_shape = hidden_states.shape[:-1]
-                hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
-
-                hidden_states = hidden_states.to(dtype=torch.bfloat16)
-                query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
-                key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
-                value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
-
-                query_states.append(query_state)
-                key_states.append(key_state)
-                value_states.append(value_state)
-
-            # B,L,H,D with L sequence length, H number of heads, D head dim
-            # concatenate on the number of embeddings/tokens
-            query_states = torch.cat(query_states, dim=1)
-            key_states = torch.cat(key_states, dim=1)
-            value_states = torch.cat(value_states, dim=1)
-
-            query_states = apply_rope(query_states, position_ids)
-            key_states = apply_rope(key_states, position_ids)
-
-            if use_cache and past_key_values is None:
-                past_key_values = {}
-
-            if use_cache:
-                if fill_kv_cache:
-                    past_key_values[layer_idx] = {
-                        "key_states": key_states,
-                        "value_states": value_states,
-                    }
-                else:
-                    # TODO here, some optimization can be done - similar to a `StaticCache` we can declare the `max_len` before.
-                    # so we create an empty cache, with just one cuda malloc, and if (in autoregressive case) we reach
-                    # the max len, then we (for instance) double the cache size. This implementation already exists
-                    # in `transformers`. (molbap)
-                    key_states = torch.cat([past_key_values[layer_idx]["key_states"], key_states], dim=1)
-                    value_states = torch.cat(
-                        [past_key_values[layer_idx]["value_states"], value_states], dim=1
-                    )
-
-            attention_interface = self.get_attention_interface()
-            att_output = attention_interface(
-                attention_mask, batch_size, head_dim, query_states, key_states, value_states
+        if inputs_embeds[0] is not None:
+            print(f"[DEBUG] PaliGemma forward - inputs_embeds[0] shape: {inputs_embeds[0].shape}")
+            print(f"[DEBUG] PaliGemma forward - attention_mask shape: {attention_mask.shape if attention_mask is not None else 'None'}")
+            prefix_output = self.paligemma.language_model.forward(
+                inputs_embeds=inputs_embeds[0],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
             )
-            att_output = att_output.to(dtype=torch.bfloat16)
+            prefix_past_key_values = prefix_output.past_key_values
+            prefix_output = prefix_output.last_hidden_state
+            print(f"[DEBUG] PaliGemma forward - prefix_output shape: {prefix_output.shape}")
+        else:
+            prefix_output = None
+            prefix_past_key_values = None
 
-            # first part of att_output is prefix (up to sequence length, [:, 0:prefix_seq_len])
-            outputs_embeds = []
-            start = 0
-            for i, hidden_states in enumerate(inputs_embeds):
-                layer = models[i].layers[layer_idx]
+        if inputs_embeds[1] is not None:
+            print(f"[DEBUG] Gemma expert forward - inputs_embeds[1] shape: {inputs_embeds[1].shape}")
+            suffix_output = self.gemma_expert.model.forward(
+                inputs_embeds=inputs_embeds[1],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+            )
+            suffix_output = suffix_output.last_hidden_state
+            print(f"[DEBUG] Gemma expert forward - suffix_output shape: {suffix_output.shape}")
+        else:
+            suffix_output = None
 
-                if hidden_states is not None:
-                    end = start + hidden_states.shape[1]
-
-                    if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
-                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(att_output[:, start:end])
-
-                    # TODO: first dropout (by default 0.0)
-
-                    # first residual
-                    out_emb += hidden_states
-                    after_first_residual = out_emb.clone()
-
-                    out_emb = layer.post_attention_layernorm(out_emb)
-                    out_emb = layer.mlp(out_emb)
-
-                    # TODO: second dropout (by default 0.0)
-
-                    # second residual
-                    out_emb += after_first_residual
-
-                    outputs_embeds.append(out_emb)
-
-                    start = end
-                else:
-                    outputs_embeds.append(None)
-
-            inputs_embeds = outputs_embeds
-
-        # final norm
-        outputs_embeds = []
-        for i, hidden_states in enumerate(inputs_embeds):
-            if hidden_states is not None:
-                out_emb = models[i].norm(hidden_states)
-                outputs_embeds.append(out_emb)
-            else:
-                outputs_embeds.append(None)
-
-        return outputs_embeds, past_key_values
-
-    def get_attention_interface(self):
-        attention_interface = self.eager_attention_forward
-        return attention_interface
-
-    def flash_attention_forward(
-        self, attention_mask, batch_size, head_dim, query_states, key_states, value_states
-    ):
-        raise NotImplementedError("FA2 is not implemented (yet)")
-
-    def eager_attention_forward(
-        self, attention_mask, batch_size, head_dim, query_states, key_states, value_states
-    ):
-        num_att_heads = 8
-        num_key_value_heads = 1
-        num_key_value_groups = num_att_heads // num_key_value_heads
-
-        # query_states: batch_size, sequence_length, num_att_head, head_dim
-        # key_states: batch_size, sequence_length, num_key_value_head, head_dim
-        # value_states: batch_size, sequence_length, num_key_value_head, head_dim
-        sequence_length = key_states.shape[1]
-
-        key_states = key_states[:, :, :, None, :].expand(
-            batch_size, sequence_length, num_key_value_heads, num_key_value_groups, head_dim
-        )
-        key_states = key_states.reshape(
-            batch_size, sequence_length, num_key_value_heads * num_key_value_groups, head_dim
-        )
-
-        value_states = value_states[:, :, :, None, :].expand(
-            batch_size, sequence_length, num_key_value_heads, num_key_value_groups, head_dim
-        )
-        value_states = value_states.reshape(
-            batch_size, sequence_length, num_key_value_heads * num_key_value_groups, head_dim
-        )
-
-        # Attention here is upcasted to float32 to match the original eager implementation.
-
-        query_states = query_states.to(dtype=torch.float32)
-        key_states = key_states.to(dtype=torch.float32)
-
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-
-        att_weights = torch.matmul(query_states, key_states.transpose(2, 3))
-        att_weights *= head_dim**-0.5
-        big_neg = -2.3819763e38  # See gemma/modules.py
-
-        masked_att_weights = torch.where(attention_mask[:, None, :, :], att_weights, big_neg)
-
-        probs = nn.functional.softmax(masked_att_weights, dim=-1)
-        probs = probs.to(dtype=value_states.dtype)
-
-        # probs: batch_size, num_key_value_head, num_att_head, sequence_length, sequence_length
-        # value_states: batch_size, sequence_length, num_att_heads, head_dim
-
-        att_output = torch.matmul(probs, value_states.permute(0, 2, 1, 3))
-
-        print(f"[PyTorch DEBUG] att_output: {att_output.shape}")
-        print(f"[PyTorch DEBUG] att_output stats: min={att_output.min():.6f}, max={att_output.max():.6f}, mean={att_output.mean():.6f}")
-
-        att_output = att_output.permute(0, 2, 1, 3)
-        # we use -1 because sequence length can change
-        att_output = att_output.reshape(batch_size, -1, num_key_value_heads * num_key_value_groups * head_dim)
-
-        return att_output
+        return [prefix_output, suffix_output], prefix_past_key_values

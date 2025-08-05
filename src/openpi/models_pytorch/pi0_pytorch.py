@@ -166,7 +166,7 @@ class PI0Pytorch(nn.Module):
             img_emb = self.paligemma_with_expert.embed_image(img)
             img_emb = img_emb.to(dtype=torch.bfloat16)
 
-            # TODO: why we need to do this?
+            # # TODO: why we need to do this?
             img_emb_dim = img_emb.shape[-1]
             img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
 
@@ -206,6 +206,12 @@ class PI0Pytorch(nn.Module):
         print(f"  - pad_masks shape: {pad_masks.shape}")
         print(f"  - att_masks shape: {att_masks.shape}")
         print(f"  - embs stats: min={embs.min():.6f}, max={embs.max():.6f}, mean={embs.mean():.6f}")
+
+        # Print mean of embeddings along sequence length dimension (dim=1)
+        # print(f"[PyTorch DEBUG] Mean embeddings across sequence length:")
+        # torch.set_printoptions(threshold=float('inf'))
+        # print(f"  {embs.mean(dim=1)[0, :]}")  # First 5 elements of first batch
+        # torch.set_printoptions(threshold=10)
         # Debug: Print first 5 elements of first batch's embeddings
         print(f"[PyTorch DEBUG] First 5 elements of first batch's embeddings:")
         print(f"  {embs[0, 0:5, 0:5]}")
@@ -314,7 +320,6 @@ class PI0Pytorch(nn.Module):
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation['state'].shape[0]
         device = observation['state'].device
-
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
@@ -377,29 +382,25 @@ class PI0Pytorch(nn.Module):
         # Compute image and language key value cache
         # Add head dimension to attention mask: [B, seq_len, seq_len] -> [B, 1, seq_len, seq_len]
         prefix_att_2d_masks_4d = prefix_att_2d_masks[:, None, :, :]
+        prefix_att_2d_masks_4d = torch.where(prefix_att_2d_masks_4d, 0.0, -2.3819763e38)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"
 
-        _, past_key_values = self.paligemma_with_expert.forward(
+        output, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
-            fill_kv_cache=True,
         )
-        
-        # Debug: past_key_values after paligemma_with_expert.forward
-        print(f"[PyTorch DEBUG] past_key_values after paligemma_with_expert.forward:")
-        print(f"  - past_key_values type: {type(past_key_values)}")
-        if past_key_values is not None:
-            if isinstance(past_key_values, list) and len(past_key_values) == 2:
-                print(f"  - prefix_past_key_values: {type(past_key_values[0])}")
-                if past_key_values[0] is not None and len(past_key_values[0]) > 0:
-                    print(f"    - first layer keys shape: {past_key_values[0][0][0].shape}")
-                print(f"  - suffix_past_key_values: {type(past_key_values[1])}")
-            else:
-                print(f"  - unexpected format: {past_key_values}")
-        else:
-            print(f"  - past_key_values is None")
+        print(f"[PyTorch DEBUG] output shape: {output[0].shape}")
+        print(f"[PyTorch DEBUG] output stats: min={output[0].min():.6f}, max={output[0].max():.6f}, mean={output[0].mean():.6f}")
+        # Print mean of output along sequence length dimension
+        # if output[0] is not None:
+        #     seq_mean = torch.mean(output[0], dim=1)  # Average across sequence length dimension
+        #     print(f"[PyTorch DEBUG] Mean across sequence length (first batch):")
+        #     torch.set_printoptions(threshold=float('inf'))
+        #     print(f"  {seq_mean[0, :]}")  # Print first 5 elements of first batch
+        #     torch.set_printoptions(threshold=30)
 
         dt = -1.0 / num_steps
         model_device = next(self.paligemma_with_expert.parameters()).device
@@ -433,6 +434,9 @@ class PI0Pytorch(nn.Module):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, timestep)
 
+        print(f"[PyTorch DEBUG] suffix_embs shape: {suffix_embs.shape}")
+        print(f"[PyTorch DEBUG] suffix_embs stats: min={suffix_embs.min():.6f}, max={suffix_embs.max():.6f}, mean={suffix_embs.mean():.6f}")
+
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
         prefix_len = prefix_pad_masks.shape[1]
@@ -442,46 +446,55 @@ class PI0Pytorch(nn.Module):
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
 
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        print(f"[PyTorch DEBUG] full_att_2d_masks shape: {full_att_2d_masks.shape}")
+        print(f"[PyTorch DEBUG] past_key_values[0][0].shape: {past_key_values[0][0].shape}")
+        print(f"[PyTorch DEBUG] suffix_len: {suffix_len}")
+        print(f"[PyTorch DEBUG] prefix_len: {prefix_len}")
+        print(f"[PyTorch DEBUG] batch_size: {batch_size}")
 
-        # When using past_key_values, we need to account for the full sequence length
-        # The transformer expects attention mask to cover: past_key_values + new suffix tokens
-        # Adjust the attention mask to match the expected sequence length
-        if past_key_values is not None:
-            # Get the actual key length from past_key_values
-            # past_key_values is [prefix_past_key_values, suffix_past_key_values]
-            # We want the prefix past_key_values: past_key_values[0]
-            # Then access layer 0, keys tensor: past_key_values[0][0][0]
-            # Format: [prefix/suffix][layer][key/value][batch, heads, seq_len, head_dim]
-            if past_key_values[0] is not None and len(past_key_values[0]) > 0:
-                past_seq_len = past_key_values[0][0][0].shape[2]
-            else:
-                # Fallback: if prefix is None, try suffix
-                past_seq_len = past_key_values[1][0][0].shape[2] if past_key_values[1] is not None else 0
-            current_seq_len = full_att_2d_masks.shape[2]
-            expected_seq_len = past_seq_len + suffix_len
+        # # When using past_key_values, we need to account for the full sequence length
+        # # The transformer expects attention mask to cover: past_key_values + new suffix tokens
+        # # Adjust the attention mask to match the expected sequence length
+        # if past_key_values is not None:
+        #     # Get the actual key length from past_key_values
+        #     # past_key_values is [prefix_past_key_values, suffix_past_key_values]
+        #     # We want the prefix past_key_values: past_key_values[0]
+        #     # Then access layer 0, keys tensor: past_key_values[0][0][0]
+        #     # Format: [prefix/suffix][layer][key/value][batch, heads, seq_len, head_dim]
+        #     if past_key_values[0] is not None and len(past_key_values[0]) > 0:
+        #         past_seq_len = past_key_values[0][0][0].shape[2]
+        #     else:
+        #         # Fallback: if prefix is None, try suffix
+        #         past_seq_len = past_key_values[1][0][0].shape[2] if past_key_values[1] is not None else 0
+        #     current_seq_len = full_att_2d_masks.shape[2]
+        #     expected_seq_len = past_seq_len + suffix_len
 
-            if current_seq_len != expected_seq_len:
-                # Pad the attention mask to match expected length
-                pad_size = expected_seq_len - current_seq_len
-                padding = torch.ones(
-                    batch_size, suffix_len, pad_size, dtype=full_att_2d_masks.dtype, device=full_att_2d_masks.device
-                )
-                full_att_2d_masks = torch.cat([full_att_2d_masks, padding], dim=2)
+        #     if current_seq_len != expected_seq_len:
+        #         # Pad the attention mask to match expected length
+        #         pad_size = expected_seq_len - current_seq_len
+        #         padding = torch.ones(
+        #             batch_size, suffix_len, pad_size, dtype=full_att_2d_masks.dtype, device=full_att_2d_masks.device
+        #         )
+        #         full_att_2d_masks = torch.cat([full_att_2d_masks, padding], dim=2)
 
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
         # Add head dimension to attention mask: [B, seq_len, seq_len] -> [B, 1, seq_len, seq_len]
         full_att_2d_masks_4d = full_att_2d_masks[:, None, :, :]
+        full_att_2d_masks_4d = torch.where(full_att_2d_masks_4d, 0.0, -2.3819763e38)
+        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
-            use_cache=True,
-            fill_kv_cache=False,
+            use_cache=False,
         )
+
+        print(f"[PyTorch DEBUG] outputs_embeds shape: {outputs_embeds[1].shape}")
+        print(f"[PyTorch DEBUG] outputs_embeds stats: min={outputs_embeds[1].min():.6f}, max={outputs_embeds[1].max():.6f}, mean={outputs_embeds[1].mean():.6f}")
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
