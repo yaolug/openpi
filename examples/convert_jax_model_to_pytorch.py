@@ -14,7 +14,7 @@ Usage:
     python convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
 
 Example:
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/user/.cache/openpi/openpi-assets/checkpoints/pi0_base/params --output_path ./pi0_pytorch
+    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_base/params --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_base_pytorch
 """
 
 import argparse

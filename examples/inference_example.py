@@ -64,7 +64,7 @@ def run_jax_inference_example(observation, model_name):
         from openpi.policies.policy import Policy
 
         config = _config.get_config(model_name)
-        checkpoint_dir = download.maybe_download(f"s3://openpi-assets/checkpoints/{model_name}")
+        checkpoint_dir = download.maybe_download(f"gs://openpi-assets/checkpoints/{model_name}")
         
         # Create trained policy
         policy = _policy_config.create_trained_policy(config, checkpoint_dir)
