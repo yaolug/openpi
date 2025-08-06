@@ -94,6 +94,7 @@ class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.pi05 = config.pi05
 
         # paligemma_with_export_config = PaliGemmaWithExpertConfig(
         #     freeze_vision_encoder=self.config.freeze_vision_encoder,
@@ -106,12 +107,16 @@ class PI0Pytorch(nn.Module):
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config)
 
         # Projections are float32
-        self.state_proj = nn.Linear(32, action_expert_config.width)
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
 
-        self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
-        self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        if self.pi05:
+            self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
+            self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        else:
+            self.state_proj = nn.Linear(32, action_expert_config.width)
+            self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
+            self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
     #     self.set_requires_grad()
 

@@ -249,7 +249,7 @@ def slice_paligemma_state_dict(state_dict, config):
     return final_state_dict, expert_dict
 
 
-def slice_gemma_state_dict(state_dict, config, num_expert=1):
+def slice_gemma_state_dict(state_dict, config, num_expert=1, checkpoint_dir=None):
     """Convert Gemma JAX parameters to PyTorch format."""
     print(f"\n🧠 Converting Gemma expert parameters (expert {num_expert})...")
     
@@ -272,8 +272,16 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1):
     llm_mlp_gating_einsum = state_dict.pop(f"llm/layers/mlp_{num_expert}/gating_einsum{suffix}")
     llm_mlp_linear = state_dict.pop(f"llm/layers/mlp_{num_expert}/linear{suffix}")
 
-    llm_input_layernorm = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/scale{suffix}")
-    llm_post_attention_layernorm = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/scale{suffix}")
+    if "pi05" in checkpoint_dir:
+        # llm_input_layernorm_bias = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/bias{suffix}")
+        # llm_post_attention_layernorm_bias = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/bias{suffix}")
+        # llm_input_layernorm_kernel = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/kernel{suffix}")
+        # llm_post_attention_layernorm_kernel = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/kernel{suffix}")
+        # TODO: add pi05 support
+        pass
+    else:
+        llm_input_layernorm = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/scale{suffix}")
+        llm_post_attention_layernorm = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/scale{suffix}")
 
     print(f"\n🔄 Converting {config.num_hidden_layers} Gemma expert layers...")
     for i in range(config.num_hidden_layers):
@@ -298,8 +306,17 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1):
         up_proj_weight = llm_mlp_gating_einsum[i, 1]
         state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.mlp.up_proj.weight"] = up_proj_weight.transpose()
         state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.mlp.down_proj.weight"] = llm_mlp_linear[i].transpose()
-        state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.weight"] = llm_input_layernorm[i]
-        state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.weight"] = llm_post_attention_layernorm[i]
+
+        if "pi05" in checkpoint_dir:
+            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.bias"] = llm_input_layernorm_bias[i]
+            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.dense.bias"] = llm_post_attention_layernorm_bias[i]
+            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.weight"] = llm_input_layernorm_kernel[i]
+            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.dense.weight"] = llm_post_attention_layernorm_kernel[i]
+            # TODO add pi05 support
+            pass
+        else:
+            state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.weight"] = llm_input_layernorm[i]
+            state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.weight"] = llm_post_attention_layernorm[i]
 
     state_dict["paligemma_with_expert.gemma_expert.model.norm.weight"] = state_dict.pop(f"llm/final_norm_{num_expert}/scale{suffix}")
     #state_dict["paligemma_with_expert.gemma_expert.lm_head.weight"] = embedding_vector # weights are tied.
@@ -460,13 +477,22 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     
     # Process projection params
     print(f"\n🎯 Converting projection parameters...")
-    keys = [
-        "state_proj",
-        "action_in_proj", 
-        "action_out_proj",
-        "action_time_mlp_in",
-        "action_time_mlp_out",
-    ]
+
+    if "pi05" in checkpoint_dir:
+        keys = [
+            "action_in_proj", 
+            "action_out_proj",
+            "time_mlp_in", 
+            "time_mlp_out",
+        ]
+    else:
+        keys = [
+            "state_proj",
+            "action_in_proj", 
+            "action_out_proj",
+            "action_time_mlp_in",
+            "action_time_mlp_out",
+        ]
 
     projection_params = {}
     for key in keys:
@@ -560,7 +586,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     paligemma_params, expert_params = slice_paligemma_state_dict(initial_params["paligemma_params"], paligemma_config)
 
     # Process Gemma weights from expert_params
-    gemma_params = slice_gemma_state_dict(expert_params, action_expert_config, num_expert=1)
+    gemma_params = slice_gemma_state_dict(expert_params, action_expert_config, num_expert=1, checkpoint_dir=checkpoint_dir)
 
     # Create Pi0Config based on checkpoint path
     if "pi0_aloha_sim" in checkpoint_dir:
