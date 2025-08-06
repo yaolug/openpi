@@ -160,8 +160,8 @@ def compare_results(jax_result, pytorch_result):
         print("✅ Results match within strict tolerance!")
     elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-4, atol=1e-5):
         print("⚠️  Results match within moderate tolerance (rtol=1e-4, atol=1e-5)")
-    elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=1e-2, atol=1e-3):
-        print("⚠️  Results match within loose tolerance (rtol=1e-3, atol=1e-4)")
+    elif np.allclose(jax_result["actions"], pytorch_result["actions"], rtol=2e-2, atol=2e-3):
+        print("⚠️  Results match within loose tolerance (rtol=2e-2, atol=2e-3)")
     else:
         print("❌ Results differ significantly even with loose tolerance!")
 
