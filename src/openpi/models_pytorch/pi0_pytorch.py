@@ -104,7 +104,7 @@ class PI0Pytorch(nn.Module):
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
 
-        self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config)
+        self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config, use_adarms=[False, True] if self.pi05 else [False, False])
 
         # Projections are float32
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
@@ -230,44 +230,56 @@ class PI0Pytorch(nn.Module):
         pad_masks = []
         att_masks = []
 
-        # Embed state
-        state_emb = self.state_proj(state)
-        state_emb = state_emb.to(dtype=torch.bfloat16)
-        embs.append(state_emb[:, None, :])
-        bsize = state_emb.shape[0]
-        dtype = state_emb.dtype
-        device = state_emb.device
+        if not self.pi05:
+            # Embed state
+            state_emb = self.state_proj(state)
+            state_emb = state_emb.to(dtype=torch.bfloat16)
+            embs.append(state_emb[:, None, :])
+            bsize = state_emb.shape[0]
+            dtype = state_emb.dtype
+            device = state_emb.device
 
-        state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
-        pad_masks.append(state_mask)
+            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+            pad_masks.append(state_mask)
 
-        # Set attention masks so that image and language inputs do not attend to state or actions
-        att_masks += [1]
+            # Set attention masks so that image and language inputs do not attend to state or actions
+            att_masks += [1]
 
         # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = create_sinusoidal_pos_embedding(
-            timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=device
+            timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
         )
-        time_emb = time_emb.type(dtype=dtype)
+        time_emb = time_emb.type(dtype=timestep.dtype)
 
         # Fuse timestep + action information using an MLP
         action_emb = self.action_in_proj(noisy_actions)
 
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
-        action_time_emb = torch.cat([action_emb, time_emb], dim=2)
+        if not self.pi05:
+            time_emb = time_emb[:, None, :].expand_as(action_emb)
 
-        action_time_emb = self.action_time_mlp_in(action_time_emb)
-        action_time_emb = F.silu(action_time_emb)  # swish == silu
-        action_time_emb = self.action_time_mlp_out(action_time_emb)
+            action_time_emb = torch.cat([action_emb, time_emb], dim=2)
 
-        # Convert to bfloat16 to match state embeddings
-        action_time_emb = action_time_emb.to(dtype=torch.bfloat16)
+            action_time_emb = self.action_time_mlp_in(action_time_emb)
+            action_time_emb = F.silu(action_time_emb)  # swish == silu
+            action_time_emb = self.action_time_mlp_out(action_time_emb)
+
+            # Convert to bfloat16 to match state embeddings
+            action_time_emb = action_time_emb.to(dtype=torch.bfloat16)
+            adarms_cond = None
+        else:
+            # time MLP (for adaRMS)
+            time_emb = self.time_mlp_in(time_emb)
+            time_emb = F.silu(time_emb)  # swish == silu
+            time_emb = self.time_mlp_out(time_emb)
+            time_emb = F.silu(time_emb)
+            action_time_emb = action_emb
+            adarms_cond = time_emb
 
         # Add to input tokens
         embs.append(action_time_emb)
 
         bsize, action_time_dim = action_time_emb.shape[:2]
-        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
+        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device)
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
@@ -278,7 +290,7 @@ class PI0Pytorch(nn.Module):
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
-        return embs, pad_masks, att_masks
+        return embs, pad_masks, att_masks, adarms_cond
 
     def forward(self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
@@ -293,7 +305,7 @@ class PI0Pytorch(nn.Module):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
@@ -311,6 +323,7 @@ class PI0Pytorch(nn.Module):
             inputs_embeds=[prefix_embs, suffix_embs],
             use_cache=False,
             fill_kv_cache=False,
+            adarms_cond=[None, adarms_cond]
         )
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         # Original openpi code, upcast attention output
@@ -437,7 +450,7 @@ class PI0Pytorch(nn.Module):
         timestep,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(state, x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
 
         print(f"[PyTorch DEBUG] suffix_embs shape: {suffix_embs.shape}")
         print(f"[PyTorch DEBUG] suffix_embs stats: min={suffix_embs.min():.6f}, max={suffix_embs.max():.6f}, mean={suffix_embs.mean():.6f}")
@@ -496,6 +509,7 @@ class PI0Pytorch(nn.Module):
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
             use_cache=False,
+            adarms_cond=[None, adarms_cond]
         )
 
         print(f"[PyTorch DEBUG] outputs_embeds shape: {outputs_embeds[1].shape}")

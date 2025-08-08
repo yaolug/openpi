@@ -15,7 +15,7 @@ Usage:
 
 Example:
     python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_base/params --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_base_pytorch
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid/params --output_path /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi5_droid_pytorch2
+    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid/params --output_path /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid_pytorch2
 """
 
 import argparse
@@ -230,18 +230,27 @@ def slice_paligemma_state_dict(state_dict, config):
 
     expert_dict = {}
     final_state_dict = {}
+    
+    # Expert-related keys to extract (including pi05 Dense layer parameters)
+    expert_keys = [
+        f"llm/final_norm_1/scale{suffix}",
+        f"llm/final_norm_1/Dense_0/bias{suffix}",
+        f"llm/final_norm_1/Dense_0/kernel{suffix}",
+        f"llm/layers/attn/attn_vec_einsum_1/w{suffix}",
+        f"llm/layers/attn/kv_einsum_1/w{suffix}",
+        f"llm/layers/attn/q_einsum_1/w{suffix}",
+        f"llm/layers/mlp_1/gating_einsum{suffix}",
+        f"llm/layers/mlp_1/linear{suffix}",
+        f"llm/layers/pre_attention_norm_1/scale{suffix}",
+        f"llm/layers/pre_attention_norm_1/Dense_0/bias{suffix}",
+        f"llm/layers/pre_attention_norm_1/Dense_0/kernel{suffix}",
+        f"llm/layers/pre_ffw_norm_1/scale{suffix}",
+        f"llm/layers/pre_ffw_norm_1/Dense_0/bias{suffix}",
+        f"llm/layers/pre_ffw_norm_1/Dense_0/kernel{suffix}",
+    ]
+    
     for key, value in state_dict.items():
-        if key not in [
-            f"llm/final_norm_1/scale{suffix}",
-            f"llm/layers/attn/attn_vec_einsum_1/w{suffix}",
-            f"llm/layers/attn/kv_einsum_1/w{suffix}",
-            f"llm/layers/attn/q_einsum_1/w{suffix}",
-            f"llm/layers/mlp_1/gating_einsum{suffix}",
-            f"llm/layers/mlp_1/linear{suffix}",
-            f"llm/layers/pre_attention_norm_1/scale{suffix}",
-            f"llm/layers/pre_ffw_norm_1/scale{suffix}",
-        ]:
-            print(f"[PyTorch DEBUG] key: {key}")
+        if key not in expert_keys:
             final_state_dict[key] = torch.from_numpy(value)
         else:
             expert_dict[key] = value
@@ -272,14 +281,17 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1, checkpoint_dir=None
     llm_mlp_gating_einsum = state_dict.pop(f"llm/layers/mlp_{num_expert}/gating_einsum{suffix}")
     llm_mlp_linear = state_dict.pop(f"llm/layers/mlp_{num_expert}/linear{suffix}")
 
+    # Check if we have Dense layers (for pi05/adaptive normalization) or scale layers (for regular pi0)
     if "pi05" in checkpoint_dir:
-        # llm_input_layernorm_bias = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/bias{suffix}")
-        # llm_post_attention_layernorm_bias = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/bias{suffix}")
-        # llm_input_layernorm_kernel = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/kernel{suffix}")
-        # llm_post_attention_layernorm_kernel = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/kernel{suffix}")
-        # TODO: add pi05 support
-        pass
+        # Pi05 with adaptive normalization
+        print(f"  Detected pi05/adaptive normalization format - using Dense layers")
+        llm_input_layernorm_bias = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/bias{suffix}")
+        llm_post_attention_layernorm_bias = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/bias{suffix}")
+        llm_input_layernorm_kernel = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/kernel{suffix}")
+        llm_post_attention_layernorm_kernel = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/kernel{suffix}")
     else:
+        # Regular pi0 with standard RMSNorm
+        print(f"  Detected standard RMSNorm format - using scale layers")
         llm_input_layernorm = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/scale{suffix}")
         llm_post_attention_layernorm = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/scale{suffix}")
 
@@ -308,18 +320,28 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1, checkpoint_dir=None
         state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.mlp.down_proj.weight"] = llm_mlp_linear[i].transpose()
 
         if "pi05" in checkpoint_dir:
-            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.bias"] = llm_input_layernorm_bias[i]
-            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.dense.bias"] = llm_post_attention_layernorm_bias[i]
-            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.weight"] = llm_input_layernorm_kernel[i]
-            # state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.dense.weight"] = llm_post_attention_layernorm_kernel[i]
-            # TODO add pi05 support
-            pass
+            # Pi05 with adaptive normalization - use Dense layer parameters directly
+            state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.bias"] = llm_input_layernorm_bias[i]
+            state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.dense.bias"] = llm_post_attention_layernorm_bias[i]
+            state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.weight"] = llm_input_layernorm_kernel[i].transpose()
+            state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.dense.weight"] = llm_post_attention_layernorm_kernel[i].transpose()
         else:
+            # Regular pi0 with standard RMSNorm
             state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.weight"] = llm_input_layernorm[i]
             state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.post_attention_layernorm.weight"] = llm_post_attention_layernorm[i]
 
-    state_dict["paligemma_with_expert.gemma_expert.model.norm.weight"] = state_dict.pop(f"llm/final_norm_{num_expert}/scale{suffix}")
-    #state_dict["paligemma_with_expert.gemma_expert.lm_head.weight"] = embedding_vector # weights are tied.
+    # Handle final norm layer
+    if "pi05" in checkpoint_dir:
+        # Pi05 with adaptive normalization - use Dense layer parameters directly
+        final_norm_bias = state_dict.pop(f"llm/final_norm_{num_expert}/Dense_0/bias{suffix}")
+        final_norm_kernel = state_dict.pop(f"llm/final_norm_{num_expert}/Dense_0/kernel{suffix}")
+        state_dict["paligemma_with_expert.gemma_expert.model.norm.dense.bias"] = final_norm_bias
+        state_dict["paligemma_with_expert.gemma_expert.model.norm.dense.weight"] = final_norm_kernel.transpose()
+    else:
+        # Regular pi0 with standard RMSNorm
+        state_dict["paligemma_with_expert.gemma_expert.model.norm.weight"] = state_dict.pop(f"llm/final_norm_{num_expert}/scale{suffix}")
+    
+        #state_dict["paligemma_with_expert.gemma_expert.lm_head.weight"] = embedding_vector # weights are tied.
 
     final_state_dict = {}
     for key, value in state_dict.items():
@@ -603,6 +625,12 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
         pi0_config = Pi0Config(
             action_dim=8,   # Base droid has 8 action dimensions
             action_horizon=10,
+        )
+    elif "pi05_droid" in checkpoint_dir:
+        pi0_config = Pi0Config(
+            action_dim=8,   # Base droid has 8 action dimensions
+            action_horizon=10,
+            pi05=True,
         )
     else:
         print("Warning: Could not determine PI0 config from checkpoint path. Using base config.")

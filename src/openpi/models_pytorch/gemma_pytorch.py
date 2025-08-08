@@ -14,7 +14,7 @@ from transformers.models.auto import CONFIG_MAPPING
 
 
 class PaliGemmaWithExpertModel(nn.Module):
-    def __init__(self, vlm_config, action_expert_config):
+    def __init__(self, vlm_config, action_expert_config, use_adarms=[False, False]):
         super().__init__()
 
         # TODO simplify config, to get the config from the name and then override necessary fields
@@ -41,6 +41,8 @@ class PaliGemmaWithExpertModel(nn.Module):
                     "num_key_value_heads": vlm_config.num_kv_heads,
                     "torch_dtype": "float32",
                     "vocab_size": 257152,
+                    "use_adarms": use_adarms[0],
+                    "adarms_cond_dim": vlm_config.width if use_adarms[0] else None,
                 },
                 vision_config={
                     "hidden_size": 1152,
@@ -79,6 +81,8 @@ class PaliGemmaWithExpertModel(nn.Module):
                 transformers_version="4.48.1",
                 use_cache=True,
                 vocab_size=257152,
+                use_adarms=use_adarms[1],
+                adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
             )
 
         # TODO convert to pytorch config
@@ -146,6 +150,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         past_key_values: list[torch.FloatTensor] | Cache | None = None,
         inputs_embeds: list[torch.FloatTensor] = None,
         use_cache: bool | None = None,
+        adarms_cond: list[torch.Tensor] | None = None,
     ):
         if inputs_embeds[0] is not None:
             print(f"[DEBUG] PaliGemma forward - inputs_embeds[0] shape: {inputs_embeds[0].shape}")
@@ -156,6 +161,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
+                adarms_cond=adarms_cond[0] if adarms_cond is not None else None,
             )
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
@@ -172,6 +178,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
+                adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
             suffix_output = suffix_output.last_hidden_state
             print(f"[DEBUG] Gemma expert forward - suffix_output shape: {suffix_output.shape}")

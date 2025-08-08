@@ -24,7 +24,7 @@ def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
     """Create example input data matching the expected format."""
     
     if model_name == "pi0_aloha_sim":
-        # Create example data for ALOHA sim environment
+        # Create example data for ALOHA sim environment (uses AlohaInputs format)
         example = {
             "images": {
                 "cam_high": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
@@ -34,7 +34,7 @@ def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
             "prompt": "Pick up the cube and place it in the bin",
         }
     elif model_name == "pi0_aloha_towel":
-        # Create example data for ALOHA towel task
+        # Create example data for ALOHA towel task (uses AlohaInputs format)
         example = {
             "images": {
                 "cam_high": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
@@ -44,13 +44,28 @@ def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
             "prompt": "Fold the towel neatly on the table",
         }
     elif model_name == "pi0_base":
-        # Create example data for base droid policy
+        # Create example data for base model (uses basic observation format)
         example = {
-            "images": {
-                "cam_high": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
-                "cam_low": np.random.randint(0, 256, size=(3, 224, 224), dtype=np.uint8),
+            "image": {
+                "base_0_rgb": np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8),
+                "left_wrist_0_rgb": np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8),
+                "right_wrist_0_rgb": np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8),
+            },
+            "image_mask": {
+                "base_0_rgb": True,
+                "left_wrist_0_rgb": True,
+                "right_wrist_0_rgb": False,  # This camera is often masked out
             },
             "state": np.random.randn(8).astype(np.float32),  # Joint + gripper positions
+            "prompt": "Pick up the object and move it to the target location",
+        }
+    elif model_name == "pi05_droid":
+        # Create example data for droid policy (uses DroidInputs format)
+        example = {
+            "observation/exterior_image_1_left": np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8),
+            "observation/wrist_image_left": np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8),
+            "observation/joint_position": np.random.randn(7).astype(np.float32),  # 7 joint positions
+            "observation/gripper_position": np.random.randn(1).astype(np.float32),  # 1 gripper position
             "prompt": "Pick up the object and move it to the target location",
         }
     else:
@@ -172,7 +187,7 @@ def compare_results(jax_result, pytorch_result):
 def main():
     parser = argparse.ArgumentParser(description="Run inference with both JAX and PyTorch Pi0 models")
     parser.add_argument("--model_name", type=str, default="pi0_aloha_sim", 
-                       choices=["pi0_aloha_sim", "pi0_aloha_towel", "pi0_base"],
+                       choices=["pi0_aloha_sim", "pi0_aloha_towel", "pi0_base", "pi05_droid"],
                        help="Model name to use")
     parser.add_argument("--jax_checkpoint_dir", type=str, default=None,
                        help="Directory containing JAX model checkpoints")
