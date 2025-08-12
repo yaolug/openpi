@@ -55,20 +55,20 @@ class GemmaRMSNorm(nn.Module):
         
         # Dense layer for adaptive normalization (if cond_dim is provided)
         if cond_dim is not None:
+            #self.dense = nn.Linear(cond_dim, dim * 3, bias=True, dtype=torch.bfloat16)
             self.dense = nn.Linear(cond_dim, dim * 3, bias=True)
             # Initialize with zeros (matches source implementation)
             nn.init.zeros_(self.dense.weight)
         else:
-            self.weight = nn.Parameter(torch.zeros(dim))
+            self.weight = nn.Parameter(torch.zeros(dim, dtype=torch.bfloat16))
             self.dense = None
 
     def _norm(self, x):
         # Compute variance in float32 (like the source implementation)
-        x_float = x.float()
-        var = torch.mean(torch.square(x_float), dim=-1, keepdim=True)
+        var = torch.mean(torch.square(x.float()), dim=-1, keepdim=True)
         # Compute normalization in float32
-        normed_inputs = x_float * torch.rsqrt(var + self.eps)
-        return normed_inputs.to(x.dtype)
+        normed_inputs = x * torch.rsqrt(var + self.eps)
+        return normed_inputs
 
     def forward(self, x, cond=None):
         dtype = x.dtype  # original dtype, could be half-precision
@@ -78,16 +78,14 @@ class GemmaRMSNorm(nn.Module):
             # regular RMSNorm
             # scale by learned parameter in float32 (matches source implementation)
             normed_inputs = normed_inputs * (1.0 + self.weight.float())
-            return normed_inputs.type_as(x), None  # return in original dtype with None gate
+            return normed_inputs.to(dtype), None  # return in original dtype with None gate
         
         # adaptive RMSNorm (if cond is provided and dense layer exists)
         if cond.shape[-1] != self.cond_dim:
             raise ValueError(f"Expected cond dimension {self.cond_dim}, got {cond.shape[-1]}")
         
-        # Ensure cond matches the Dense layer's weight dtype
-        cond_dtype = self.dense.weight.dtype
-        modulation = self.dense(cond.to(cond_dtype))
-        
+        self.dense.to(dtype=torch.bfloat16).to(dtype=torch.float32)
+        modulation = self.dense(cond)
         # Reshape modulation to broadcast properly: [batch, 1, features] for [batch, seq, features]
         if len(x.shape) == 3:  # [batch, seq, features]
             modulation = modulation.unsqueeze(1)
@@ -95,14 +93,15 @@ class GemmaRMSNorm(nn.Module):
         scale, shift, gate = torch.chunk(modulation, 3, dim=-1)
         
         # Apply adaptive normalization: use model weight dtype to ensure compatibility
-        model_dtype = self.dense.weight.dtype  # Use the model's dtype (bfloat16)
-        scale = scale.to(model_dtype)
-        shift = shift.to(model_dtype)
-        gate = gate.to(model_dtype)
-        normed_inputs = normed_inputs.to(model_dtype)  # Convert normed_inputs to model dtype
+        # model_dtype = self.dense.weight.dtype  # Use the model's dtype (bfloat16)
+        # scale = scale.to(model_dtype)
+        # shift = shift.to(model_dtype)
+        # gate = gate.to(model_dtype)
+        # normed_inputs = normed_inputs.to(model_dtype)  # Convert normed_inputs to model dtype
         
-        normed_inputs = normed_inputs * (1 + scale) + shift
-        return normed_inputs, gate
+        normed_inputs = normed_inputs * (1 + scale.to(torch.float32)) + shift.to(torch.float32)
+
+        return normed_inputs.to(dtype), gate.to(dtype)
 
     def extra_repr(self):
         repr_str = f"{tuple(self.weight.shape)}, eps={self.eps}"
@@ -248,8 +247,6 @@ def eager_attention_forward(
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    # Ensure value_states is in the same dtype as attn_weights
-    value_states = value_states.to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -291,11 +288,7 @@ class GemmaAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: bool = False,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        # Ensure hidden_states matches the model weight dtype for consistent computation
-        model_dtype = self.q_proj.weight.dtype
-        hidden_states = hidden_states.to(model_dtype)
-        
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:        
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -332,8 +325,6 @@ class GemmaAttention(nn.Module):
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        # Ensure attn_output matches o_proj weight dtype
-        attn_output = attn_output.to(self.o_proj.weight.dtype)
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
@@ -363,11 +354,6 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
         adarms_cond: Optional[torch.Tensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        # Ensure adarms_cond matches model dtype if provided
-        if adarms_cond is not None:
-            model_dtype = hidden_states.dtype
-            adarms_cond = adarms_cond.to(model_dtype)
-        
         residual = hidden_states
         hidden_states, gate = self.input_layernorm(hidden_states, adarms_cond)
 
@@ -512,6 +498,7 @@ class GemmaModel(GemmaPreTrainedModel):
 
         # embed positions
         hidden_states = inputs_embeds
+        hidden_states = hidden_states.to(torch.bfloat16)
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)

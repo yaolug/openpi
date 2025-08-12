@@ -62,15 +62,16 @@ class Policy(BasePolicy):
             self._rng, sample_rng = jax.random.split(self._rng)
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
-        if self._is_pytorch_model:
-            noise = torch.from_numpy(noise)
-            noise = noise.to(self._device)
-        else:
-            noise = jnp.asarray(noise)
+        if noise is not None:
+            if self._is_pytorch_model:
+                    noise = torch.from_numpy(noise)
+                    noise = noise.to(self._device)
+            else:
+                noise = jnp.asarray(noise)
 
-        if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
-            noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
-        sample_kwargs["noise"] = noise
+            if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
+                noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
+            sample_kwargs["noise"] = noise
 
         actions = (
             self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **sample_kwargs)

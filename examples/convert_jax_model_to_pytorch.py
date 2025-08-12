@@ -13,14 +13,21 @@ Usage:
     # Convert to PyTorch:
     python convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
 
-Example:
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_base/params --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_base_pytorch
+Example:    
+    # pi0_droid 
+    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_droid/params --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_droid_pytorch2
+
+    # pi0_aloha_sim
+    python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim/params --output_path /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch2
+
+    # pi05_droid
     python convert_jax_model_to_pytorch.py --checkpoint_dir /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid/params --output_path /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid_pytorch2
 """
 
 import argparse
 import pathlib
 from typing import Any, Dict
+import os
 
 import jax
 import numpy as np
@@ -33,6 +40,9 @@ from safetensors.torch import save_model
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
 from openpi.models.pi0_config import Pi0Config
 import openpi.models.gemma as _gemma
+from openpi.shared import download
+from openpi.models import model as _model
+import jax.numpy as jnp
 
 PRECISIONS = {"bfloat16": torch.bfloat16, "float32": torch.float32, "float16": torch.float16}
 
@@ -86,10 +96,13 @@ def slice_paligemma_state_dict(state_dict, config):
     print(f"  {jax_key} -> {pytorch_key}")
     state_dict[pytorch_key] = state_dict.pop(jax_key).transpose(3, 2, 0, 1)
     
+    
     jax_key = f"img/embedding/bias{suffix}"
     pytorch_key = "paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.bias"
     print(f"  {jax_key} -> {pytorch_key}")
     state_dict[pytorch_key] = state_dict.pop(jax_key)
+
+    print(f"[PyTorch DEBUG] mean(abs(patch_embedding.bias)): {state_dict[pytorch_key]}")
     
     # positional embeddings
     jax_key = f"img/pos_embedding{suffix}"
@@ -354,33 +367,25 @@ def slice_gemma_state_dict(state_dict, config, num_expert=1, checkpoint_dir=None
     return final_state_dict
 
 
-def slice_initial_orbax_checkpoint(checkpoint_dir: str):
-    """Load and process the initial orbax checkpoint."""
-    params_path = pathlib.Path(checkpoint_dir).resolve()
-    checkpointer = ocp.PyTreeCheckpointer()
+def slice_initial_orbax_checkpoint(checkpoint_dir: str, restore_precision: str | None = None):
+    """Load and process params by restoring via JAX model loader first.
+    This respects dtype conversions that occur during model restore.
+    """
+    params_dir = pathlib.Path(checkpoint_dir).resolve()
+    # Allow passing the root checkpoint dir; use params/ if present
+    if (params_dir / "params").exists():
+        params_dir = params_dir / "params"
 
-    metadata = checkpointer.metadata(params_path)
-    print("Metadata keys:", list(metadata.keys()))
+    # Map precision string to JAX dtype, or None to keep saved dtypes
+    dtype_map = {
+        "float32": jnp.float32,
+        "bfloat16": jnp.bfloat16,
+        "float16": jnp.float16,
+    }
+    restore_dtype = dtype_map.get(restore_precision) if restore_precision else None
 
-    params_name = "params"
-    item = {params_name: metadata[params_name]}
-    device = jax.local_devices()[0]
-    sharding = SingleDeviceSharding(device)
-    restored = checkpointer.restore(
-        params_path,
-        ocp.args.PyTreeRestore(
-            item=item,
-            restore_args=jax.tree_util.tree_map(
-                lambda _: ocp.ArrayRestoreArgs(
-                    restore_type=jax.Array,
-                    sharding=sharding,
-                ),
-                item,
-            ),
-            transforms={},
-        ),
-    )
-    params = restored[params_name]
+    # Use repository restore utility to load a pure dict of params (value suffix removed)
+    params = _model.restore_params(params_dir, restore_type=jax.Array, dtype=restore_dtype)
 
     # get params for PaliGemma
     pali_params = params["PaliGemma"]
@@ -454,7 +459,7 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
         # Flatten and print all keys
         flat_params = flatten_for_inspection(params)
         
-        print(f"All parameter keys ({len(flat_params)} total):")
+        print(f"All parameter keys with shapes and dtypes ({len(flat_params)} total):")
         print("=" * 80)
         
         # Sort keys for better readability
@@ -493,8 +498,8 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     print(f"Converting PI0 checkpoint from {checkpoint_dir} to {output_path}")
     print("=" * 80)
     
-    # Break down orbax ckpts
-    initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir)
+    # Break down orbax ckpts by restoring via JAX to respect dtype
+    initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir, restore_precision=precision)
     print(f"[PyTorch DEBUG] initial_params: {initial_params.keys()}")
     
     # Process projection params
@@ -632,6 +637,12 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
             action_horizon=10,
             pi05=True,
         )
+    elif "pi05_libero" in checkpoint_dir:
+        pi0_config = Pi0Config(
+            action_dim=7,
+            action_horizon=10,
+            pi05=True,
+        )
     else:
         print("Warning: Could not determine PI0 config from checkpoint path. Using base config.")
         pi0_config = Pi0Config(
@@ -654,20 +665,20 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     print(f"  - Target precision: {precision} ({torch_dtype})")
     
     # Print all JAX keys and shapes
-    print(f"\n📋 JAX Model Keys and Shapes:")
+    print(f"\n📋 JAX Model Keys, Shapes, and Dtypes:")
     print("=" * 80)
     for key, value in all_params.items():
         if isinstance(value, torch.Tensor):
-            print(f"  {key}: {value.shape}")
+            print(f"  {key}: {value.shape}, dtype: {value.dtype}")
         else:
             print(f"  {key}: {type(value)}")
     
     # Print all PyTorch model keys and shapes
-    print(f"\n📋 PyTorch Model Keys and Shapes:")
+    print(f"\n📋 PyTorch Model Keys, Shapes, and Dtypes:")
     print("=" * 80)
     pytorch_state_dict = pi0_model.state_dict()
     for key, value in pytorch_state_dict.items():
-        print(f"  {key}: {value.shape}")
+        print(f"  {key}: {value.shape}, dtype: {value.dtype}")
     
     # Find missing keys
     print(f"\n🔍 Missing Keys Analysis:")
@@ -774,6 +785,13 @@ def main():
     )
     
     args = parser.parse_args()
+
+    if not os.path.exists(args.checkpoint_dir):
+        model_name = args.checkpoint_dir.split("/")[-2]
+        # Use s3:// instead of gs:// for proper openpi-assets bucket access
+        checkpoint_dir = download.maybe_download(f"s3://openpi-assets/checkpoints/{model_name}")
+    else:
+        checkpoint_dir = args.checkpoint_dir
     
     if args.inspect_only:
         load_jax_model_and_print_keys(args.checkpoint_dir)
@@ -781,7 +799,7 @@ def main():
         if not args.output_path:
             print("Error: --output_path is required for conversion. Use --inspect_only to only view keys.")
             return
-        convert_pi0_checkpoint(args.checkpoint_dir, args.precision, args.output_path)
+        convert_pi0_checkpoint(checkpoint_dir, args.precision, args.output_path)
 
 
 if __name__ == "__main__":

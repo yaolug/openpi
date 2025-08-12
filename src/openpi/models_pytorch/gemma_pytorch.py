@@ -121,17 +121,36 @@ class PaliGemmaWithExpertModel(nn.Module):
     #         self.paligemma.eval()
 
     def to_bfloat16_like_physical_intelligence(self):
-        self.paligemma = self.paligemma.to(dtype=torch.bfloat16)
+        self = self.to(dtype=torch.bfloat16)
+        # self.paligemma = self.paligemma.to(dtype=torch.bfloat16)
+        # self.gemma_expert = self.gemma_expert.to(dtype=torch.bfloat16)
+        # return
 
         params_to_change_dtype = [
-            "language_model.model.layers",
+            "language_model.layers",
             "gemma_expert.model.layers",
             "vision_tower",
             "multi_modal",
+            "language_model.embed_tokens",
         ]
+
+        params_to_keep_float32 = [
+            "vision_tower.vision_model.embeddings.patch_embedding.weight",
+            "vision_tower.vision_model.embeddings.patch_embedding.bias",
+            "vision_tower.vision_model.embeddings.position_embedding.weight",
+            "input_layernorm",
+            "post_attention_layernorm",
+            "model.norm",
+        ]
+
         for name, param in self.named_parameters():
             if any(selector in name for selector in params_to_change_dtype):
-                param.data = param.data.to(dtype=torch.bfloat16)
+                if any(selector in name for selector in params_to_keep_float32):
+                    param.data = param.data.to(dtype=torch.float32)
+                else:
+                    param.data = param.data.to(dtype=torch.bfloat16)
+            else:
+                param.data = param.data.to(dtype=torch.float32)
 
     def embed_image(self, image: torch.Tensor):
         # Handle different transformers versions

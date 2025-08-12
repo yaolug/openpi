@@ -168,12 +168,13 @@ class PI0Pytorch(nn.Module):
             img,
             img_mask,
         ) in zip(images, img_masks):
+            print(f"[PyTorch DEBUG] abs mean of image: {torch.mean(torch.abs(img))}")
             img_emb = self.paligemma_with_expert.embed_image(img)
             img_emb = img_emb.to(dtype=torch.bfloat16)
 
             # # TODO: why we need to do this?
-            img_emb_dim = img_emb.shape[-1]
-            img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
+            # img_emb_dim = img_emb.shape[-1]
+            # img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
 
             bsize, num_img_embs = img_emb.shape[:2]
             img_mask = img_mask[:, None].expand(bsize, num_img_embs)
@@ -183,6 +184,9 @@ class PI0Pytorch(nn.Module):
 
             # Create attention masks so that image tokens attend to each other
             att_masks += [0] * num_img_embs
+
+        # embs = torch.cat(embs, dim=1)
+        # return embs, pad_masks, att_masks
 
         lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
 
@@ -232,6 +236,8 @@ class PI0Pytorch(nn.Module):
 
         if not self.pi05:
             # Embed state
+            # self.state_proj = self.state_proj.to(dtype=torch.bfloat16).to(dtype=torch.float32)
+
             state_emb = self.state_proj(state)
             state_emb = state_emb.to(dtype=torch.bfloat16)
             embs.append(state_emb[:, None, :])
@@ -252,9 +258,13 @@ class PI0Pytorch(nn.Module):
         time_emb = time_emb.type(dtype=timestep.dtype)
 
         # Fuse timestep + action information using an MLP
+        # self.action_in_proj = self.action_in_proj.to(dtype=torch.bfloat16).to(dtype=torch.float32)
         action_emb = self.action_in_proj(noisy_actions)
 
         if not self.pi05:
+            # self.action_time_mlp_in = self.action_time_mlp_in.to(dtype=torch.bfloat16).to(dtype=torch.float32)
+            # self.action_time_mlp_out = self.action_time_mlp_out.to(dtype=torch.bfloat16).to(dtype=torch.float32)
+
             time_emb = time_emb[:, None, :].expand_as(action_emb)
 
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
@@ -328,6 +338,8 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
+
+        # self.action_out_proj = self.action_out_proj.to(dtype=torch.bfloat16).to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
@@ -335,9 +347,15 @@ class PI0Pytorch(nn.Module):
 
     @torch.no_grad()
     def sample_actions(self, observation, noise=None, num_steps=10) -> Tensor:
+        #num_steps = 1
+
+        # for key in observation:
+        #     if isinstance(observation[key], torch.Tensor) and observation[key].dtype == torch.float32:
+        #         observation[key] = observation[key].to(dtype=torch.bfloat16)
+
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation['state'].shape[0]
-        device = observation['state'].device
+        device = next(self.paligemma_with_expert.parameters()).device
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
@@ -393,7 +411,9 @@ class PI0Pytorch(nn.Module):
         lang_masks = lang_masks.to(device=next(self.paligemma_with_expert.parameters()).device)
         state = state.to(device=next(self.paligemma_with_expert.parameters()).device)
 
+        #print(f"[PyTorch DEBUG] images: {images}")
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        #return prefix_embs.to(torch.float32)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
@@ -453,6 +473,7 @@ class PI0Pytorch(nn.Module):
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
 
         print(f"[PyTorch DEBUG] suffix_embs shape: {suffix_embs.shape}")
+        print(f"[PyTorch DEBUG] suffix_embs dtype: {suffix_embs.dtype}")
         print(f"[PyTorch DEBUG] suffix_embs stats: min={suffix_embs.min():.6f}, max={suffix_embs.max():.6f}, mean={suffix_embs.mean():.6f}")
 
         suffix_len = suffix_pad_masks.shape[1]
